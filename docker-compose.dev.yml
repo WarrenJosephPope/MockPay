@@ -40,3 +40,24 @@ services:
       retries: 20
       start_period: 5s
     restart: unless-stopped
+
+  # A local SMTP server with a web inbox, so invitation and reset emails can actually be
+  # read during development. Point the gateway at it with:
+  #
+  #   MOCKPAY_SMTP_HOST=localhost
+  #   MOCKPAY_SMTP_PORT=1025
+  #
+  # Then open http://localhost:8025 to see what was sent. Without these variables the
+  # gateway writes emails to its log instead and this container is simply unused.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: ${CONTAINER_PREFIX:-mockpay}-mailpit
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"   # SMTP
+      - "${MAILPIT_WEB_PORT:-8025}:8025"    # web inbox
+    environment:
+      MP_MAX_MESSAGES: 500
+      # Nothing here ever leaves the machine.
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    restart: unless-stopped

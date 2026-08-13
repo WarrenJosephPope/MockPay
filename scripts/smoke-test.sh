@@ -14,6 +14,21 @@ if [ -f "$(dirname "$0")/../.env" ]; then
   set -a; . "$(dirname "$0")/../.env"; set +a
 fi
 B=${MOCKPAY_BASE_URL:-http://localhost:${GATEWAY_PORT:-8088}}
+# With no SMTP host configured, EmailService writes messages to the application log, and the reset
+# test reads the link from there.
+#
+# The reset token is deliberately NOT returned by the API the way an invitation token is. Creating
+# an invitation requires being an authenticated OWNER, so echoing that token back leaks nothing the
+# caller could not already do. /forgot-password is unauthenticated — returning a token there would
+# let anyone request a reset for any address and immediately take the account over. Scraping the
+# log is the awkward-but-safe option.
+#
+# Point at a file, or at a command for a containerised gateway:
+#   MOCKPAY_LOG_FILE=/tmp/app.log
+#   MOCKPAY_LOG_CMD="docker logs mockpay-gateway"
+LOGFILE=${MOCKPAY_LOG_FILE:-/tmp/p3.log}
+LOGCMD=${MOCKPAY_LOG_CMD:-}
+readlog() { if [ -n "$LOGCMD" ]; then $LOGCMD 2>&1; else cat "$LOGFILE" 2>/dev/null; fi; }
 SK=sk_test_demo_us_secret
 SK_IN=sk_test_demo_in_secret
 PK=pk_test_demo_us_publishable
@@ -32,6 +47,18 @@ except Exception: print('')"; }
 action() { python -c "import sys,json
 try: print(json.load(sys.stdin)['next_action']['url'].split('action=')[1])
 except Exception: print('')"; }
+field_err() { python -c "import sys,json
+try: print(json.load(sys.stdin)['error'].get('$1',''))
+except Exception: print('')"; }
+
+# --- dashboard helpers: session cookie jar + CSRF token ------------------------
+# $1 path  $2 cookie-jar        (GET / DELETE)
+# $1 path  $2 body  $3 jar      (POST / PATCH)
+csrf()    { grep XSRF-TOKEN "$1" 2>/dev/null | awk '{print $7}'; }
+dget()    { curl -s -b "$2" -c "$2" "$B$1"; }
+dpost()   { curl -s -b "$3" -c "$3" -X POST "$B$1" -H 'Content-Type: application/json' -H "X-XSRF-TOKEN: $(csrf "$3")" -d "$2"; }
+dpatch()  { curl -s -b "$3" -c "$3" -X PATCH "$B$1" -H 'Content-Type: application/json' -H "X-XSRF-TOKEN: $(csrf "$3")" -d "$2"; }
+ddelete() { curl -s -b "$2" -c "$2" -X DELETE "$B$1" -H "X-XSRF-TOKEN: $(csrf "$2")"; }
 
 echo "=== 1. Authentication ==="
 chk "no key -> 401" "$(curl -s $B/v1/account)" "no_api_key"
@@ -159,7 +186,7 @@ chk "fee income booked" "$r" "FEE_INCOME"
 chk "trial balance is zero" "$(api GET /v1/account/balance)" '"_TOTAL_MUST_BE_ZERO":0'
 
 echo; echo "=== 13. Settlement ==="
-TODAY=$(python -c "import datetime;print(datetime.date.today())")
+TODAY=$(python -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).date())")  # UTC: matches MOCKPAY_SETTLEMENT_ZONE
 r=$(api POST /v1/settlements/run "{\"currency\":\"USD\",\"period_start\":\"$TODAY\",\"period_end\":\"$TODAY\"}")
 STL=$(echo "$r" | field id)
 chk "batch created" "$r" '"status":"pending_payout"'
@@ -275,6 +302,146 @@ echo; echo "=== 21. Tenant isolation on the new resources ==="
 chk "cannot list another merchant's keys" "$(api GET /v1/api_keys '' $SK_IN | grep -c 'demo_us')" '^0$'
 chk "cannot revoke another merchant's key" "$(api POST /v1/api_keys/$K1/revoke '{}' $SK_IN)" "resource_missing"
 chk "cannot read another merchant's endpoint" "$(api GET /v1/webhook_endpoints/whe_nope '' $SK_IN)" "resource_missing"
+
+echo; echo "=== 22. Dashboard signup and session ==="
+DJ=/tmp/mp_owner.txt; rm -f $DJ
+PW='correct horse battery staple'
+EMAIL="owner+$(date +%s)@acme.test"
+r=$(curl -s -c $DJ -X POST $B/dashboard/auth/signup -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\",\"name\":\"Ada\",\"business_name\":\"Acme Ltd\",\"currency\":\"GBP\",\"country\":\"GB\"}")
+MID=$(echo "$r" | field merchant_id)
+NEWSK=$(echo "$r" | field secret_key)
+chk "signup creates user + business" "$r" '"merchant_id":"acct_'
+chk "secret key returned once at signup" "$r" '"secret_key":"sk_test_'
+chk "session cookie issued" "$(grep -c mockpay_session $DJ)" '^1$'
+chk "signup key works on the v1 API" "$(api GET /v1/account '' $NEWSK)" "$MID"
+chk "/dashboard/me works with the session" "$(dget /dashboard/me $DJ)" "\"role\":\"OWNER\""
+chk "no session -> 401" "$(curl -s -o /dev/null -w '%{http_code}' $B/dashboard/me)" '^401$'
+chk "weak password rejected" "$(curl -s -X POST $B/dashboard/auth/signup -H 'Content-Type: application/json' -d '{"email":"w@a.test","password":"short","name":"X"}')" "weak_password"
+chk "duplicate email rejected" "$(curl -s -X POST $B/dashboard/auth/signup -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}")" "email_already_registered"
+
+echo; echo "=== 23. Login, logout, credential handling ==="
+LJ=/tmp/mp_login.txt; rm -f $LJ
+chk "login succeeds" "$(curl -s -c $LJ -X POST $B/dashboard/auth/login -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}")" '"role":"OWNER"'
+WRONG=$(curl -s -X POST $B/dashboard/auth/login -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"password\":\"definitely not it\"}" | field_err message)
+UNKNOWN=$(curl -s -X POST $B/dashboard/auth/login -H 'Content-Type: application/json' -d '{"email":"nobody@nowhere.test","password":"definitely not it"}' | field_err message)
+if [ "$WRONG" = "$UNKNOWN" ] && [ -n "$WRONG" ]; then echo "  PASS  wrong password and unknown email are indistinguishable"; PASS=$((PASS+1));
+else echo "  FAIL  login errors differ: '$WRONG' vs '$UNKNOWN'"; FAIL=$((FAIL+1)); fi
+chk "logout invalidates the session" "$(dpost /dashboard/auth/logout '{}' $LJ)" '"logged_out":true'
+chk "session dead after logout" "$(curl -s -o /dev/null -w '%{http_code}' -b $LJ $B/dashboard/me)" '^401$'
+
+echo; echo "=== 24. CSRF ==="
+CSRF=$(csrf $DJ)
+chk "CSRF cookie is issued" "$(echo ${#CSRF})" '^3[0-9]$'
+chk "state-changing POST without token -> 403" "$(curl -s -o /dev/null -w '%{http_code}' -b $DJ -X POST $B/dashboard/api-keys -H 'Content-Type: application/json' -d '{"type":"secret"}')" '^403$'
+chk "GET needs no token" "$(curl -s -o /dev/null -w '%{http_code}' -b $DJ $B/dashboard/me)" '^200$'
+chk "POST with token succeeds" "$(dpost /dashboard/api-keys '{"type":"secret","name":"CI"}' $DJ)" '"key":"sk_test_'
+
+echo; echo "=== 25. RBAC matrix ==="
+# Invite one user per role, accept, and probe what each can do.
+for role in ADMIN DEVELOPER VIEWER; do
+  lc=$(echo $role | tr 'A-Z' 'a-z')
+  TOK=$(dpost /dashboard/team/invitations "{\"email\":\"$lc+$(date +%s)@acme.test\",\"role\":\"$role\"}" $DJ | field token)
+  RJ=/tmp/mp_$lc.txt; rm -f $RJ
+  curl -s -c $RJ -X POST $B/dashboard/auth/accept-invitation -H 'Content-Type: application/json' \
+    -d "{\"token\":\"$TOK\",\"password\":\"$PW\",\"name\":\"$role person\"}" >/dev/null
+  chk "$role can read /dashboard/me" "$(dget /dashboard/me $RJ)" "\"role\":\"$role\""
+done
+
+chk "VIEWER cannot list API keys"      "$(dget /dashboard/api-keys /tmp/mp_viewer.txt)" "insufficient_role"
+chk "DEVELOPER can list API keys"      "$(dget /dashboard/api-keys /tmp/mp_developer.txt)" '"object":"list"'
+chk "DEVELOPER cannot CREATE a key"    "$(dpost /dashboard/api-keys '{"type":"secret"}' /tmp/mp_developer.txt)" "insufficient_role"
+chk "ADMIN can create a key"           "$(dpost /dashboard/api-keys '{"type":"secret","name":"admin key"}' /tmp/mp_admin.txt)" '"key":"sk_test_'
+chk "DEVELOPER can manage endpoints"   "$(dpost /dashboard/webhook-endpoints "{\"url\":\"$B/webhook-sink\"}" /tmp/mp_developer.txt)" '"object":"webhook_endpoint"'
+chk "VIEWER cannot manage endpoints"   "$(dpost /dashboard/webhook-endpoints "{\"url\":\"$B/webhook-sink\"}" /tmp/mp_viewer.txt)" "insufficient_role"
+chk "ADMIN cannot invite (OWNER only)" "$(dpost /dashboard/team/invitations '{"email":"x@y.test","role":"VIEWER"}' /tmp/mp_admin.txt)" "insufficient_role"
+chk "OWNER can invite"                 "$(dpost /dashboard/team/invitations "{\"email\":\"extra+$(date +%s)@acme.test\",\"role\":\"VIEWER\"}" $DJ)" '"token"'
+chk "VIEWER can read payments"         "$(dget /dashboard/payments /tmp/mp_viewer.txt)" '"object":"list"'
+
+echo; echo "=== 26. Refunds are ADMIN-only (money movement) ==="
+PMX=$(api POST /v1/payment_methods '{"type":"card","card":{"number":"4242424242424242","exp_month":12,"exp_year":2030,"cvc":"123"}}' $NEWSK | field id)
+PIX=$(api POST /v1/payment_intents "{\"amount\":5000,\"currency\":\"GBP\",\"payment_method\":\"$PMX\",\"confirm\":true}" $NEWSK | field id)
+chk "payment created on the new account" "$PIX" '^pi_'
+chk "DEVELOPER cannot refund" "$(dpost /dashboard/refunds "{\"payment_intent\":\"$PIX\",\"amount\":100}" /tmp/mp_developer.txt)" "insufficient_role"
+chk "VIEWER cannot refund"    "$(dpost /dashboard/refunds "{\"payment_intent\":\"$PIX\",\"amount\":100}" /tmp/mp_viewer.txt)" "insufficient_role"
+chk "ADMIN can refund"        "$(dpost /dashboard/refunds "{\"payment_intent\":\"$PIX\",\"amount\":100}" /tmp/mp_admin.txt)" '"status":"succeeded"'
+
+echo; echo "=== 27. Audit log ==="
+AL=$(dget /dashboard/audit-log $DJ)
+chk "audit log readable by OWNER" "$AL" '"object":"list"'
+chk "signup recorded"       "$AL" "account.created"
+chk "key creation recorded" "$AL" "api_key.created"
+chk "refund recorded"       "$AL" "refund.issued"
+chk "invitation recorded"   "$AL" "member.invited"
+chk "actor email captured"  "$AL" "$EMAIL"
+chk "IP address captured"   "$AL" '"ip_address"'
+chk "DEVELOPER cannot read the audit log" "$(dget /dashboard/audit-log /tmp/mp_developer.txt)" "insufficient_role"
+
+echo; echo "=== 28. Cross-tenant isolation for dashboard users ==="
+OJ=/tmp/mp_other.txt; rm -f $OJ
+OTHER="other+$(date +%s)@rival.test"
+r=$(curl -s -c $OJ -X POST $B/dashboard/auth/signup -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$OTHER\",\"password\":\"$PW\",\"name\":\"Rival\",\"business_name\":\"Rival Inc\"}")
+OMID=$(echo "$r" | field merchant_id)
+chk "second business created" "$OMID" '^acct_'
+chk "rival sees only their own payments" "$(dget /dashboard/payments $OJ | python -c "import sys,json;print(json.load(sys.stdin)['total_count'])")" '^0$'
+chk "rival cannot read the other payment" "$(dget /dashboard/payments/$PIX $OJ)" "resource_missing"
+chk "rival's audit log is separate" "$(dget /dashboard/audit-log $OJ | grep -c "$EMAIL")" '^0$'
+chk "rival cannot switch into a foreign account" "$(dpost /dashboard/switch-account "{\"merchant_id\":\"$MID\"}" $OJ)" "resource_missing"
+
+echo; echo "=== 29. Team safety rails ==="
+OWNMEM=$(dget /dashboard/team $DJ | python -c "
+import sys,json
+d=json.load(sys.stdin)['data']
+print(next(m['membership_id'] for m in d if m['role']=='OWNER'))")
+chk "cannot remove the last owner" "$(ddelete /dashboard/team/$OWNMEM $DJ)" "cannot_remove_last_owner"
+chk "cannot demote the last owner" "$(dpatch /dashboard/team/$OWNMEM '{"role":"VIEWER"}' $DJ)" "cannot_demote_last_owner"
+chk "team lists all members" "$(dget /dashboard/team $DJ | python -c "import sys,json;print(len(json.load(sys.stdin)['data']))")" '^4$'
+
+echo; echo "=== 30. Revoked access takes effect immediately ==="
+VMEM=$(dget /dashboard/team $DJ | python -c "
+import sys,json
+d=json.load(sys.stdin)['data']
+print(next(m['membership_id'] for m in d if m['role']=='VIEWER'))")
+chk "viewer works before removal" "$(dget /dashboard/me /tmp/mp_viewer.txt)" '"role":"VIEWER"'
+chk "owner removes the viewer" "$(ddelete /dashboard/team/$VMEM $DJ)" '"removed":true'
+chk "their existing session is now refused" "$(dget /dashboard/me /tmp/mp_viewer.txt)" "no_access"
+
+echo; echo "=== 31. Password reset ==="
+RJ=/tmp/mp_reset.txt; rm -f $RJ
+RESET_EMAIL="reset+$(date +%s)@acme.test"
+curl -s -c $RJ -X POST $B/dashboard/auth/signup -H 'Content-Type: application/json'   -d "{\"email\":\"$RESET_EMAIL\",\"password\":\"$PW\",\"name\":\"Reset Tester\",\"business_name\":\"Reset Co\"}" >/dev/null
+chk "session is live before reset" "$(dget /dashboard/me $RJ)" '"role":"OWNER"'
+
+KNOWN=$(curl -s -X POST $B/dashboard/auth/forgot-password -H 'Content-Type: application/json' -d "{\"email\":\"$RESET_EMAIL\"}")
+UNKNOWN=$(curl -s -X POST $B/dashboard/auth/forgot-password -H 'Content-Type: application/json' -d '{"email":"definitely-nobody@nowhere.test"}')
+if [ "$KNOWN" = "$UNKNOWN" ] && [ -n "$KNOWN" ]; then echo "  PASS  forgot-password reveals nothing about who has an account"; PASS=$((PASS+1));
+else echo "  FAIL  responses differ: '$KNOWN' vs '$UNKNOWN'"; FAIL=$((FAIL+1)); fi
+
+# With no SMTP configured the email is written to the log; that is where the link lives.
+# Poll rather than sleep: delivery runs on the mail executor, so a fixed wait is a race.
+RTOK=""
+for _ in $(seq 1 20); do
+  RTOK=$(readlog | grep -oE 'reset-password\?token=[A-Za-z0-9]+' | tail -1 | sed 's/.*token=//')
+  [ -n "$RTOK" ] && break
+  sleep 1
+done
+chk "reset link emailed (found in the log transport)" "$RTOK" '^[A-Za-z0-9]\{40,\}$'
+chk "bad token rejected" "$(curl -s -X POST $B/dashboard/auth/reset-password -H 'Content-Type: application/json' -d '{"token":"nonsense","password":"a brand new passphrase"}')" "invalid_reset_token"
+chk "weak new password rejected" "$(curl -s -X POST $B/dashboard/auth/reset-password -H 'Content-Type: application/json' -d "{\"token\":\"$RTOK\",\"password\":\"short\"}")" "weak_password"
+chk "reset succeeds" "$(curl -s -X POST $B/dashboard/auth/reset-password -H 'Content-Type: application/json' -d "{\"token\":\"$RTOK\",\"password\":\"a brand new passphrase\"}")" "Password updated"
+chk "token is single-use" "$(curl -s -X POST $B/dashboard/auth/reset-password -H 'Content-Type: application/json' -d "{\"token\":\"$RTOK\",\"password\":\"another new passphrase\"}")" "invalid_reset_token"
+
+chk "OLD password no longer works" "$(curl -s -X POST $B/dashboard/auth/login -H 'Content-Type: application/json' -d "{\"email\":\"$RESET_EMAIL\",\"password\":\"$PW\"}")" "invalid_credentials"
+NJ=/tmp/mp_reset_new.txt; rm -f $NJ
+chk "NEW password works" "$(curl -s -c $NJ -X POST $B/dashboard/auth/login -H 'Content-Type: application/json' -d "{\"email\":\"$RESET_EMAIL\",\"password\":\"a brand new passphrase\"}")" '"role":"OWNER"'
+
+echo; echo "=== 32. Reset signs out every existing session ==="
+chk "the pre-reset session is dead" "$(curl -s -o /dev/null -w '%{http_code}' -b $RJ $B/dashboard/me)" '^401$'
+chk "the post-reset session works" "$(dget /dashboard/me $NJ)" '"role":"OWNER"'
+
+echo; echo "=== 33. Emailed tokens are stored hashed ==="
+chk "invitation token returned only while SMTP is unset" "$(dpost /dashboard/team/invitations "{\"email\":\"hashcheck+$(date +%s)@acme.test\",\"role\":\"VIEWER\"}" $DJ)" "no SMTP host is configured"
 
 echo; echo "======================================"
 echo "  PASS: $PASS   FAIL: $FAIL"

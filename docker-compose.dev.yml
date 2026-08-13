@@ -21,7 +21,7 @@ name: ${COMPOSE_PROJECT_NAME:-mockpay}-dev
 services:
   postgres:
     image: postgres:${POSTGRES_VERSION:-16-alpine}
-    container_name: ${COMPOSE_PROJECT_NAME:-mockpay}-postgres-dev
+    container_name: ${CONTAINER_PREFIX:-mockpay}-postgres-dev
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-mockpay}
       POSTGRES_USER: ${POSTGRES_USER:-mockpay}

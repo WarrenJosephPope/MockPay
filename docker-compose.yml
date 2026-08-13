@@ -16,7 +16,7 @@ name: ${COMPOSE_PROJECT_NAME:-mockpay}
 services:
   postgres:
     image: postgres:${POSTGRES_VERSION:-16-alpine}
-    container_name: ${COMPOSE_PROJECT_NAME:-mockpay}-postgres
+    container_name: ${CONTAINER_PREFIX:-mockpay}-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-mockpay}
       POSTGRES_USER: ${POSTGRES_USER:-mockpay}
@@ -43,7 +43,7 @@ services:
       args:
         GATEWAY_PORT: ${GATEWAY_PORT:-8088}
     image: ${GATEWAY_IMAGE:-mockpay/gateway:local}
-    container_name: ${COMPOSE_PROJECT_NAME:-mockpay}-gateway
+    container_name: ${CONTAINER_PREFIX:-mockpay}-gateway
     depends_on:
       postgres:
         # Not just "started" — Flyway would race initdb and the app would die on

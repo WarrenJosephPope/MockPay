@@ -77,10 +77,31 @@ Two are seeded at startup with fixed keys:
 | Demo Store (US) | `sk_test_demo_us_secret` | `pk_test_demo_us_publishable` | USD |
 | Demo Store (India) | `sk_test_demo_in_secret` | `pk_test_demo_in_publishable` | INR |
 
-On Postgres they are created once and persist. On H2 they are recreated every start.
+On Postgres they are created once and persist. On H2 they are recreated every start. Disable them
+entirely with `MOCKPAY_SEED_DEMO_ACCOUNTS=false` — publicly documented credentials are a backdoor,
+not a convenience.
 
 **Secret keys** (`sk_`) are server-side only and can move money. **Publishable keys** (`pk_`) are
 safe in a browser and can only tokenise. That split is what makes a client-side payment form safe.
+
+Secret keys are stored as **SHA-256 hashes**. Even the seeded ones: `sk_test_demo_us_secret` works
+because its *hash* is what was written. A new key's value is returned exactly once, by the call that
+creates it, and cannot be recovered afterwards.
+
+### Creating a real account
+
+With seeding off, an empty database has no accounts — and you cannot authenticate to create one.
+The bootstrap command breaks that circle:
+
+```bash
+./mvnw spring-boot:run -Dspring-boot.run.profiles=postgres \
+  -Dspring-boot.run.arguments="--bootstrap.name=Acme --bootstrap.country=GB --bootstrap.currency=GBP"
+
+# or, in Docker
+docker compose run --rm gateway --bootstrap.name=Acme --bootstrap.country=GB
+```
+
+It creates the account, prints the key pair once, and exits.
 
 ---
 
@@ -213,7 +234,33 @@ lose every payment that needed a 3-D Secure challenge.
 | `POST` | `/v1/settlements/{id}/payout` | |
 | `GET` | `/v1/events` | The webhook outbox: attempts, backoff, errors |
 | `POST` | `/v1/events/{id}/replay` | |
-| `GET` | `/v1/account` · `POST /v1/account/webhook` · `GET /v1/account/balance` | |
+| `GET` | `/v1/account` · `GET /v1/account/balance` | |
+
+### API keys
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/v1/api_keys` | Prefixes and usage only — secret values are never returned |
+| `POST` | `/v1/api_keys` | `{"type":"secret","name":"CI"}`. **The response is the only time the key is readable.** |
+| `POST` | `/v1/api_keys/{id}/revoke` | Refuses if it is the account's last active secret key |
+
+Rotation without downtime: create the replacement, deploy it, watch `last_used_at` on the old key
+stop moving, then revoke it.
+
+### Webhook endpoints
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/v1/webhook_endpoints` | |
+| `POST` | `/v1/webhook_endpoints` | `{"url":"...","enabled_events":["payment_intent.succeeded"]}` — omit `enabled_events` for all |
+| `GET` | `/v1/webhook_endpoints/{id}` | |
+| `PATCH` | `/v1/webhook_endpoints/{id}` | Change the URL, the filter, or `enabled` |
+| `DELETE` | `/v1/webhook_endpoints/{id}` | |
+| `POST` | `/v1/account/webhook` | Shortcut: replace all endpoints with one URL |
+
+Each endpoint has **its own signing secret**, so rotating one does not break the others and a
+compromised staging endpoint cannot forge events to production. One business event fans out into one
+delivery per subscribed endpoint, each with independent retry state.
 
 ### Errors
 
@@ -275,9 +322,16 @@ Any other Luhn-valid number approves.
 These are real HTTP POSTs, not stubs. Point them at your own site:
 
 ```bash
+# Simple: one endpoint, all events
 curl -X POST http://localhost:8088/v1/account/webhook \
   -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
   -d '{"url":"http://localhost:3000/api/webhooks/mockpay"}'
+
+# Or several endpoints, each with its own filter and its own secret
+curl -X POST http://localhost:8088/v1/webhook_endpoints \
+  -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' \
+  -d '{"url":"http://localhost:3000/webhooks/orders",
+       "enabled_events":["payment_intent.succeeded","payment_intent.payment_failed"]}'
 ```
 
 Events: `payment_intent.created` · `.requires_action` · `.authorized` · `.succeeded` ·
@@ -291,8 +345,8 @@ Events: `payment_intent.created` · `.requires_action` · `.authorized` · `.suc
 MockPay-Signature: t=1786531234,v1=5257a869e7...
 ```
 
-HMAC-SHA256 over `"{timestamp}.{raw_body}"` using the account's `webhook_secret` (from
-`GET /v1/account`).
+HMAC-SHA256 over `"{timestamp}.{raw_body}"` using **that endpoint's** secret, returned by
+`GET /v1/webhook_endpoints`.
 
 Three things your handler must do — `api/WebhookSinkController.java` is a working example:
 
@@ -330,6 +384,9 @@ Replay with `POST /v1/events/{id}/replay`.
 | Chargeback lifecycle with Visa reason codes | `service/DisputeService.java` |
 | Net settlement, T+2 business days, payouts | `service/SettlementService.java` |
 | Key separation, rate limiting, tenant isolation | `api/ApiKeyFilter.java` |
+| Hashed API keys, rotation, revocation | `service/ApiKeyService.java` |
+| Multi-endpoint webhooks with event filtering | `domain/WebhookEndpoint.java`, `service/EventService.java` |
+| Account creation and bootstrap | `service/AccountService.java`, `config/BootstrapRunner.java` |
 
 Every class carries a Javadoc comment explaining *why* it works that way, not just what it does.
 Hover over a type in your IDE to read it.
@@ -338,7 +395,7 @@ Hover over a type in your IDE to read it.
 
 ## Testing
 
-96 end-to-end assertions across every flow:
+123 end-to-end assertions across every flow:
 
 ```bash
 bash scripts/smoke-test.sh
@@ -371,6 +428,7 @@ containers. Running from the CLI, export them or let the defaults apply. `.env` 
 | `POSTGRES_DB` / `_USER` / `_PASSWORD` | `mockpay` | Database credentials |
 | `POSTGRES_DATA_DIR` | `./volumes/postgres` | Where the database files live |
 | `SPRING_PROFILES_ACTIVE` | `dev` | `dev` = H2 in memory · `postgres` = PostgreSQL + Flyway |
+| `MOCKPAY_SEED_DEMO_ACCOUNTS` | `true` | Creates the two demo accounts. **Set false anywhere real.** |
 | `MOCKPAY_PUBLIC_BASE_URL` | `http://localhost:${GATEWAY_PORT}` | Goes into 3DS/UPI/wallet redirects |
 | `MOCKPAY_RAIL_MAX_LATENCY_MS` | `400` | Raise it to exercise your own timeout handling |
 | `MOCKPAY_PRICING_CARD_BPS` | `200` | 200 bps = 2.00% |
@@ -426,7 +484,7 @@ gateway-service/
 ├── docker-compose.yml          Postgres + the gateway
 ├── docker-compose.dev.yml      Postgres only; run the app from the CLI
 ├── Dockerfile                  multi-stage build, non-root runtime
-├── scripts/smoke-test.sh       96 end-to-end assertions
+├── scripts/smoke-test.sh       123 end-to-end assertions
 ├── volumes/postgres/           bind-mounted database files (gitignored)
 └── src/main/
     ├── java/dev/mockpay/gateway/

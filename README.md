@@ -291,6 +291,8 @@ lose every payment that needed a 3-D Secure challenge.
 | `POST` | `/dashboard/auth/signup` · `/login` · `/logout` · `/accept-invitation` | — |
 | `POST` | `/dashboard/auth/forgot-password` · `/reset-password` | — |
 | `GET` | `/dashboard/me` · `POST /dashboard/switch-account` | any |
+| `GET` | `/dashboard/account` | VIEWER |
+| `PATCH` | `/dashboard/account` | ADMIN |
 | `GET` | `/dashboard/payments` · `/dashboard/payments/{id}` | VIEWER |
 | `GET` | `/dashboard/team` | VIEWER |
 | `GET`/`POST`/`PATCH`/`DELETE` | `/dashboard/webhook-endpoints` | DEVELOPER |
@@ -298,7 +300,25 @@ lose every payment that needed a 3-D Secure challenge.
 | `POST` | `/dashboard/api-keys` · `/dashboard/api-keys/{id}/revoke` | ADMIN |
 | `POST` | `/dashboard/refunds` | ADMIN |
 | `GET` | `/dashboard/audit-log` | ADMIN |
+| `POST` | `/dashboard/webhook-endpoints/{id}/test` | DEVELOPER |
 | `POST`/`PATCH`/`DELETE` | `/dashboard/team/**` | OWNER |
+
+**Payment filters** on `GET /dashboard/payments`, all optional and composable:
+
+```
+?status=succeeded          &created_from=2026-08-01  &created_to=2026-08-14
+&amount_min=1000           &amount_max=50000
+&last4=4242                &query=cust_abc
+```
+
+Dates are ISO calendar days in UTC, half-open — `from` inclusive, `to` exclusive — so a single day
+covers that whole day. `query` searches description, customer reference and payment id.
+
+`GET /dashboard/payments/{id}` returns the **full ISO 8583 trace and the ledger journals**, not just
+a summary.
+
+**Send an `Idempotency-Key` header on mutating dashboard calls** (create key, create endpoint,
+refund). A UUID per button press; without one, a double click creates two of things.
 
 ### API keys
 
@@ -452,6 +472,7 @@ Replay with `POST /v1/events/{id}/replay`.
 | Argon2 passwords, lockout, uniform login errors | `service/UserService.java` |
 | Roles and per-endpoint authority | `domain/Membership.java`, `api/DashboardController.java` |
 | Append-only audit trail | `service/AuditService.java` |
+| Composable payment filtering | `service/PaymentSearch.java` |
 | Password reset, hashed single-use tokens | `service/UserService.java`, `domain/PasswordResetToken.java` |
 | Email with a console fallback | `service/EmailService.java` |
 | Sign out everywhere | `service/SessionRegistry.java` |
@@ -466,7 +487,7 @@ Hover over a type in your IDE to read it.
 
 ## Testing
 
-186 end-to-end assertions across every flow:
+227 end-to-end assertions across every flow:
 
 ```bash
 bash scripts/smoke-test.sh
@@ -562,7 +583,7 @@ gateway-service/
 ├── docker-compose.yml          Postgres + the gateway
 ├── docker-compose.dev.yml      Postgres only; run the app from the CLI
 ├── Dockerfile                  multi-stage build, non-root runtime
-├── scripts/smoke-test.sh       186 end-to-end assertions
+├── scripts/smoke-test.sh       227 end-to-end assertions
 ├── volumes/postgres/           bind-mounted database files (gitignored)
 └── src/main/
     ├── java/dev/mockpay/gateway/

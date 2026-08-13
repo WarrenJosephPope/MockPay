@@ -1,0 +1,100 @@
+# Full stack: PostgreSQL + the gateway. Nothing needed on the host but Docker.
+#
+#   docker compose up -d --build        start everything
+#   docker compose logs -f gateway      follow the app
+#   docker compose down                 stop, keep data
+#
+# Every setting comes from an environment variable with a default, so this runs
+# unchanged with no .env at all. To change anything: cp .env.example .env
+# Compose reads .env from this directory automatically.
+#
+# For day-to-day development use docker-compose.dev.yml instead: it starts only
+# Postgres, and you run the gateway from the CLI for fast rebuilds and a debugger.
+
+name: ${COMPOSE_PROJECT_NAME:-mockpay}
+
+services:
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-16-alpine}
+    container_name: ${COMPOSE_PROJECT_NAME:-mockpay}-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mockpay}
+      POSTGRES_USER: ${POSTGRES_USER:-mockpay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mockpay}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      # Published so psql and the smoke test can reach it from the host. The
+      # container-internal port stays 5432; nothing outside the network sees it.
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - ${POSTGRES_DATA_DIR:-./volumes/postgres}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mockpay} -d ${POSTGRES_DB:-mockpay}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GATEWAY_PORT: ${GATEWAY_PORT:-8088}
+    image: ${GATEWAY_IMAGE:-mockpay/gateway:local}
+    container_name: ${COMPOSE_PROJECT_NAME:-mockpay}-gateway
+    depends_on:
+      postgres:
+        # Not just "started" — Flyway would race initdb and the app would die on
+        # a connection refused. This waits for pg_isready.
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE_DOCKER:-postgres}
+      GATEWAY_PORT: ${GATEWAY_PORT:-8088}
+
+      # Container-to-container: the service name resolves on the compose network,
+      # and the port there is 5432, not the one published to the host.
+      MOCKPAY_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-mockpay}
+      POSTGRES_USER: ${POSTGRES_USER:-mockpay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mockpay}
+      MOCKPAY_DB_POOL_MAX: ${MOCKPAY_DB_POOL_MAX:-10}
+      MOCKPAY_DB_POOL_MIN_IDLE: ${MOCKPAY_DB_POOL_MIN_IDLE:-2}
+      MOCKPAY_DB_CONNECTION_TIMEOUT_MS: ${MOCKPAY_DB_CONNECTION_TIMEOUT_MS:-10000}
+
+      # Must be reachable from the customer's BROWSER, so it points at the
+      # published host port rather than anything on the internal network.
+      MOCKPAY_PUBLIC_BASE_URL: ${MOCKPAY_PUBLIC_BASE_URL:-http://localhost:${GATEWAY_PORT:-8088}}
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+
+      MOCKPAY_RAIL_MIN_LATENCY_MS: ${MOCKPAY_RAIL_MIN_LATENCY_MS:-120}
+      MOCKPAY_RAIL_MAX_LATENCY_MS: ${MOCKPAY_RAIL_MAX_LATENCY_MS:-400}
+      MOCKPAY_RAIL_TIMEOUT_PROBABILITY: ${MOCKPAY_RAIL_TIMEOUT_PROBABILITY:-0.0}
+
+      MOCKPAY_WEBHOOK_BACKOFF_SECONDS: ${MOCKPAY_WEBHOOK_BACKOFF_SECONDS:-5,30,120,600,3600,21600}
+      MOCKPAY_WEBHOOK_MAX_ATTEMPTS: ${MOCKPAY_WEBHOOK_MAX_ATTEMPTS:-6}
+      MOCKPAY_WEBHOOK_TIMEOUT_MS: ${MOCKPAY_WEBHOOK_TIMEOUT_MS:-4000}
+
+      MOCKPAY_IDEMPOTENCY_RETENTION_HOURS: ${MOCKPAY_IDEMPOTENCY_RETENTION_HOURS:-24}
+
+      MOCKPAY_PRICING_CARD_BPS: ${MOCKPAY_PRICING_CARD_BPS:-200}
+      MOCKPAY_PRICING_CARD_FIXED_MINOR: ${MOCKPAY_PRICING_CARD_FIXED_MINOR:-30}
+      MOCKPAY_PRICING_UPI_BPS: ${MOCKPAY_PRICING_UPI_BPS:-0}
+      MOCKPAY_PRICING_UPI_FIXED_MINOR: ${MOCKPAY_PRICING_UPI_FIXED_MINOR:-0}
+      MOCKPAY_PRICING_WALLET_BPS: ${MOCKPAY_PRICING_WALLET_BPS:-180}
+      MOCKPAY_PRICING_WALLET_FIXED_MINOR: ${MOCKPAY_PRICING_WALLET_FIXED_MINOR:-0}
+
+      MOCKPAY_SETTLEMENT_DELAY_DAYS: ${MOCKPAY_SETTLEMENT_DELAY_DAYS:-2}
+    ports:
+      # Same port inside and out, so redirect URLs and the container's own
+      # healthcheck stay correct whatever GATEWAY_PORT is set to.
+      - "${GATEWAY_PORT:-8088}:${GATEWAY_PORT:-8088}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:${GATEWAY_PORT:-8088}/v1/public/test_instruments >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # Spring Boot plus Flyway takes a moment; without this the container is
+      # reported unhealthy while it is still legitimately starting.
+      start_period: 45s
+    restart: unless-stopped

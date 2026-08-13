@@ -1,0 +1,28 @@
+# Keep the build context small and free of things that must never reach an image.
+#
+# Without this, `docker build` uploads target/ (a 58 MB jar plus all the class
+# files) and volumes/postgres (the entire database) on every build.
+
+target/
+volumes/
+.git/
+.gitignore
+.idea/
+.vscode/
+*.iml
+
+# Never bake secrets into an image layer. Layers are readable by anyone who can
+# pull the image, and deleting a file in a later layer does not remove it from
+# the earlier one.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.jks
+
+*.log
+logs/
+*.md
+docker-compose*.yml
+Dockerfile

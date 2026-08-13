@@ -1,0 +1,42 @@
+# Development stack: PostgreSQL only.
+#
+# The gateway itself runs from the CLI so you get fast rebuilds, a debugger, and
+# live logs:
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   ./mvnw spring-boot:run -Dspring-boot.run.profiles=postgres
+#
+# Settings come from environment variables with defaults; Compose reads .env
+# from this directory automatically. See .env.example.
+#
+# Data lives in ./volumes/postgres, a bind mount rather than a named Docker
+# volume, so you can see it, back it up, and delete it with rm -rf. It is
+# gitignored.
+#
+# Stop:            docker compose -f docker-compose.dev.yml down
+# Stop and wipe:   docker compose -f docker-compose.dev.yml down && rm -rf volumes/postgres
+
+name: ${COMPOSE_PROJECT_NAME:-mockpay}-dev
+
+services:
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-16-alpine}
+    container_name: ${COMPOSE_PROJECT_NAME:-mockpay}-postgres-dev
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mockpay}
+      POSTGRES_USER: ${POSTGRES_USER:-mockpay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mockpay}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      # Defaults to 5433, not 5432, so it does not collide with a Postgres
+      # already installed on the host.
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - ${POSTGRES_DATA_DIR:-./volumes/postgres}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mockpay} -d ${POSTGRES_DB:-mockpay}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped

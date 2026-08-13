@@ -1,0 +1,71 @@
+# Shared configuration.
+#
+# Every value below is ${ENVIRONMENT_VARIABLE:default}, so the whole application
+# is configurable without editing a file — and the file still tells you exactly
+# which variable drives which setting. See .env.example for the full list.
+#
+# Datasource and schema management live in the profile files next to this one:
+#   application-dev.yml       H2, in memory, wiped on restart      (default)
+#   application-postgres.yml  PostgreSQL + Flyway, durable
+
+spring:
+  application:
+    name: mockpay-gateway
+  profiles:
+    # Keeps `./mvnw spring-boot:run` working with no infrastructure at all.
+    default: ${SPRING_PROFILES_ACTIVE:dev}
+  jpa:
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+  jackson:
+    default-property-inclusion: non_null
+
+server:
+  # SERVER_PORT is Spring's own convention; GATEWAY_PORT is what the compose
+  # files and .env use, so both work.
+  port: ${GATEWAY_PORT:${SERVER_PORT:8088}}
+
+logging:
+  level:
+    dev.mockpay.gateway: ${LOG_LEVEL:DEBUG}
+
+mockpay:
+  # Goes into 3DS / UPI / wallet redirect URLs, so it must be reachable from the
+  # customer's browser rather than from inside the Docker network.
+  #
+  # Defaults to the configured gateway port, so changing GATEWAY_PORT alone is
+  # enough — otherwise redirect URLs would keep pointing at the old port and
+  # every 3DS challenge would 404.
+  public-base-url: ${MOCKPAY_PUBLIC_BASE_URL:http://localhost:${GATEWAY_PORT:${SERVER_PORT:8088}}}
+
+  rail:
+    # Simulated rail latency. Real card auths run 300-2000ms; raise the maximum
+    # to exercise your own timeout handling.
+    min-latency-ms: ${MOCKPAY_RAIL_MIN_LATENCY_MS:120}
+    max-latency-ms: ${MOCKPAY_RAIL_MAX_LATENCY_MS:400}
+    timeout-probability: ${MOCKPAY_RAIL_TIMEOUT_PROBABILITY:0.0}
+
+  webhook:
+    # Comma-separated; bound to List<Long>. One entry per retry attempt.
+    backoff-seconds: ${MOCKPAY_WEBHOOK_BACKOFF_SECONDS:5,30,120,600,3600,21600}
+    max-attempts: ${MOCKPAY_WEBHOOK_MAX_ATTEMPTS:6}
+    timeout-ms: ${MOCKPAY_WEBHOOK_TIMEOUT_MS:4000}
+
+  idempotency:
+    retention-hours: ${MOCKPAY_IDEMPOTENCY_RETENTION_HOURS:24}
+
+  pricing:
+    # Basis points + fixed fee in minor units, charged on capture. 200 bps = 2%.
+    card-bps: ${MOCKPAY_PRICING_CARD_BPS:200}
+    card-fixed-minor: ${MOCKPAY_PRICING_CARD_FIXED_MINOR:30}
+    # UPI interchange is ~zero for person-to-merchant payments by regulatory design.
+    upi-bps: ${MOCKPAY_PRICING_UPI_BPS:0}
+    upi-fixed-minor: ${MOCKPAY_PRICING_UPI_FIXED_MINOR:0}
+    wallet-bps: ${MOCKPAY_PRICING_WALLET_BPS:180}
+    wallet-fixed-minor: ${MOCKPAY_PRICING_WALLET_FIXED_MINOR:0}
+
+  settlement:
+    # T+N business days from capture to payout.
+    delay-days: ${MOCKPAY_SETTLEMENT_DELAY_DAYS:2}

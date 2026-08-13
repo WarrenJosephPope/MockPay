@@ -1,0 +1,93 @@
+HELP.md
+target/
+.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+
+### Local Docker volumes ###
+# PostgreSQL's data directory, bind-mounted by docker-compose. Thousands of
+# binary files, machine-specific, and it would be a data leak if committed.
+# Recreate from scratch with: docker compose down && rm -rf volumes/postgres
+volumes/
+
+### Secrets and local config ###
+# This service ships deliberately fake keys (sk_test_demo_us_secret and friends)
+# because it never touches real money. These rules exist so that if it is ever
+# pointed at something real — a sandbox acquirer, a test Stripe account — the
+# credentials cannot be committed by accident. A key leaked into git history is
+# effectively permanent: rewriting history does not help once it has been pushed.
+.env
+.env.*
+!.env.example
+application-local.*
+application-secrets.*
+*-local.yml
+*-local.yaml
+*-local.properties
+secrets/
+credentials.json
+
+# Keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.truststore
+
+### Logs and JVM crash dumps ###
+*.log
+logs/
+hs_err_pid*
+replay_pid*
+*.hprof
+
+### H2 ###
+# The demo runs in memory, but a file-based profile would write these.
+*.db
+*.mv.db
+*.trace.db
+*.lock.db
+
+### OS ###
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+desktop.ini
+$RECYCLE.BIN/
+*~
+*.swp
+
+# OneDrive sync leftovers
+*.tmp
+.~lock.*

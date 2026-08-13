@@ -1,0 +1,27 @@
+# Development profile: H2 in memory, no infrastructure required.
+#
+# Everything is wiped when the process exits. That is fine for the demo and for
+# running scripts/smoke-test.sh, and it is exactly what the `postgres` profile
+# exists to fix.
+
+spring:
+  datasource:
+    # MODE=PostgreSQL makes H2 accept Postgres SQL dialect, which keeps the two
+    # profiles behaving the same. DB_CLOSE_DELAY=-1 stops the database from
+    # evaporating when the last connection closes.
+    url: ${MOCKPAY_DB_URL:jdbc:h2:mem:mockpay;DB_CLOSE_DELAY=-1;MODE=PostgreSQL}
+    username: ${MOCKPAY_DB_USER:sa}
+    password: ${MOCKPAY_DB_PASSWORD:}
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      # Hibernate builds the schema from the @Entity classes at startup and
+      # drops it at shutdown. Convenient here; forbidden on Postgres.
+      ddl-auto: ${MOCKPAY_DDL_AUTO:create-drop}
+  h2:
+    console:
+      enabled: ${MOCKPAY_H2_CONSOLE_ENABLED:true}
+      path: ${MOCKPAY_H2_CONSOLE_PATH:/h2-console}
+  flyway:
+    # Migrations are Postgres-specific and would fail against H2.
+    enabled: ${MOCKPAY_FLYWAY_ENABLED:false}

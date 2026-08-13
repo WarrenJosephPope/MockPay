@@ -1,0 +1,46 @@
+# Durable profile: PostgreSQL, schema owned by Flyway.
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   ./mvnw spring-boot:run -Dspring-boot.run.profiles=postgres
+
+spring:
+  datasource:
+    # Compose overrides MOCKPAY_DB_URL for the containerised gateway, which
+    # reaches Postgres by service name rather than through the published port.
+    url: ${MOCKPAY_DB_URL:jdbc:postgresql://localhost:${POSTGRES_PORT:5433}/${POSTGRES_DB:mockpay}}
+    username: ${POSTGRES_USER:mockpay}
+    password: ${POSTGRES_PASSWORD:mockpay}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      # A payment gateway is correctness-bound, not throughput-bound. A small,
+      # well-understood pool beats a large one, and a connection leak surfaces
+      # as a timeout rather than as silent exhaustion.
+      maximum-pool-size: ${MOCKPAY_DB_POOL_MAX:10}
+      minimum-idle: ${MOCKPAY_DB_POOL_MIN_IDLE:2}
+      connection-timeout: ${MOCKPAY_DB_CONNECTION_TIMEOUT_MS:10000}
+      leak-detection-threshold: ${MOCKPAY_DB_LEAK_DETECTION_MS:20000}
+
+  jpa:
+    hibernate:
+      # `validate`, never `update` and certainly never `create-drop`. Hibernate
+      # compares the entities against the schema Flyway built and refuses to
+      # start if they disagree, so a forgotten migration is a startup failure
+      # rather than a column that silently does not exist.
+      ddl-auto: ${MOCKPAY_DDL_AUTO:validate}
+    properties:
+      hibernate:
+        jdbc:
+          # Batch writes. The ledger inserts several rows per journal.
+          batch_size: ${MOCKPAY_JDBC_BATCH_SIZE:30}
+        order_inserts: true
+        order_updates: true
+
+  flyway:
+    enabled: ${MOCKPAY_FLYWAY_ENABLED:true}
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+
+  h2:
+    console:
+      enabled: false

@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MockPay — demo checkout</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e8ee;
+    --muted: #9aa3b2; --accent: #5b8cff; --ok: #3ecf8e; --bad: #ff6b6b; --warn: #ffb020;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f7f9; --panel:#fff; --line:#e3e6ec; --text:#12151c; --muted:#5d6675; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 80px; }
+  header { margin-bottom: 28px; }
+  h1 { margin: 0 0 6px; font-size: 25px; letter-spacing: -0.02em; }
+  .sub { color: var(--muted); font-size: 14px; }
+  .grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.15fr); gap: 20px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  .card h2 { margin: 0 0 4px; font-size: 15px; }
+  .card .hint { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 5px; text-transform: uppercase; letter-spacing: .05em; }
+  input, select {
+    width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); font: inherit;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  button {
+    width: 100%; margin-top: 18px; padding: 11px; border: 0; border-radius: 8px;
+    background: var(--accent); color: #fff; font: 600 15px/1 inherit; cursor: pointer;
+  }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); margin-top: 10px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 4px; }
+  .tabs button { width: auto; flex: 1; margin: 0; padding: 8px; background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 500; }
+  .tabs button[aria-selected="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .instruments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .chip {
+    font: 11px/1 var(--mono); padding: 6px 8px; border-radius: 6px; cursor: pointer;
+    background: var(--bg); border: 1px solid var(--line); color: var(--muted);
+  }
+  .chip:hover { border-color: var(--accent); color: var(--text); }
+  .status { margin-top: 16px; padding: 12px 14px; border-radius: 8px; font-size: 14px; display: none; }
+  .status.show { display: block; }
+  .status.ok { background: rgba(62,207,142,.12); border: 1px solid rgba(62,207,142,.35); }
+  .status.bad { background: rgba(255,107,107,.12); border: 1px solid rgba(255,107,107,.35); }
+  .status.busy { background: rgba(91,140,255,.12); border: 1px solid rgba(91,140,255,.35); }
+  pre {
+    margin: 0; font: 11.5px/1.6 var(--mono); white-space: pre-wrap; word-break: break-word;
+    color: var(--muted); max-height: 420px; overflow: auto;
+  }
+  .log { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+  .log h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .step { display: flex; gap: 9px; padding: 5px 0; font-size: 13px; align-items: baseline; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; margin-top: 6px; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
+  .step .t { color: var(--muted); font: 11px/1.5 var(--mono); flex: 0 0 62px; }
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+  .actions button { margin: 0; font-size: 13px; padding: 9px; background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 500; }
+  .actions button:hover:not(:disabled) { border-color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>MockPay demo checkout</h1>
+    <div class="sub">
+      A real payment flow with simulated rails. The card number never reaches the demo store's
+      backend &mdash; it goes from this page straight to the gateway and comes back as a token.
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Pay</h2>
+      <div class="hint">One pair of AirPods &mdash; $49.99</div>
+
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-method="card">Card</button>
+        <button role="tab" aria-selected="false" data-method="upi">UPI</button>
+        <button role="tab" aria-selected="false" data-method="wallet">Wallet</button>
+      </div>
+
+      <div id="pane-card">
+        <label for="number">Card number</label>
+        <input id="number" inputmode="numeric" autocomplete="cc-number" value="4242424242424242">
+        <div class="row">
+          <div><label for="exp-month">Month</label><input id="exp-month" value="12"></div>
+          <div><label for="exp-year">Year</label><input id="exp-year" value="2030"></div>
+          <div><label for="cvc">CVC</label><input id="cvc" value="123"></div>
+        </div>
+        <div class="instruments" id="card-chips"></div>
+      </div>
+
+      <div id="pane-upi" hidden>
+        <label for="vpa">UPI ID</label>
+        <input id="vpa" value="success@mockpay">
+        <div class="instruments" id="upi-chips"></div>
+      </div>
+
+      <div id="pane-wallet" hidden>
+        <label for="provider">Wallet</label>
+        <select id="provider">
+          <option value="mockwallet">MockWallet (approves)</option>
+          <option value="failwallet">FailWallet (customer cancels)</option>
+        </select>
+      </div>
+
+      <div class="row2">
+        <div>
+          <label for="amount">Amount (minor units)</label>
+          <input id="amount" value="4999">
+        </div>
+        <div>
+          <label for="currency">Currency</label>
+          <select id="currency">
+            <option>USD</option><option>EUR</option><option>GBP</option><option>INR</option>
+          </select>
+        </div>
+      </div>
+
+      <label for="capture">Capture</label>
+      <select id="capture">
+        <option value="automatic">Automatic &mdash; authorise and capture at once</option>
+        <option value="manual">Manual &mdash; authorise now, capture on shipment</option>
+      </select>
+
+      <button id="pay">Pay</button>
+
+      <div class="status" id="status"></div>
+
+      <div class="actions">
+        <button id="btn-capture" disabled>Capture</button>
+        <button id="btn-refund" disabled>Refund</button>
+        <button id="btn-cancel" disabled>Cancel / void</button>
+        <button id="btn-dispute" disabled>Open dispute</button>
+      </div>
+
+      <button class="ghost" id="btn-trace" disabled>Show the ISO 8583 trace</button>
+    </div>
+
+    <div class="card">
+      <h2>What just happened</h2>
+      <div class="hint">Live view of the gateway's own record of this payment.</div>
+      <div class="log">
+        <h3>Flow</h3>
+        <div id="steps"></div>
+      </div>
+      <div class="log">
+        <h3>Response</h3>
+        <pre id="output">Nothing yet. Press Pay.</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/mockpay.js"></script>
+<script>
+/*
+ * NOTE: this page calls the gateway's *secret-key* endpoints directly (creating the intent,
+ * capturing, refunding) because it is a self-contained demo with no backend of its own. In a real
+ * integration those calls belong on your server and the secret key never appears in a browser.
+ * Only createPaymentMethod and confirmPayment — the two SDK calls — are genuinely client-side.
+ */
+const SECRET_KEY = 'sk_test_demo_us_secret';
+const PUBLISHABLE_KEY = 'pk_test_demo_us_publishable';
+const mockpay = MockPay(PUBLISHABLE_KEY);
+
+let method = 'card';
+let currentIntent = null;
+
+const $ = (id) => document.getElementById(id);
+const stepsEl = $('steps');
+const outputEl = $('output');
+const statusEl = $('status');
+
+function step(text, kind) {
+  const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
+  const row = document.createElement('div');
+  row.className = 'step';
+  row.innerHTML = `<span class="t">${time}</span><span class="dot ${kind || ''}"></span><span>${text}</span>`;
+  stepsEl.appendChild(row);
+  stepsEl.scrollTop = stepsEl.scrollHeight;
+}
+
+function show(text, kind) {
+  statusEl.className = 'status show ' + kind;
+  statusEl.textContent = text;
+}
+
+function dump(obj) {
+  outputEl.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+}
+
+async function api(path, options) {
+  const response = await fetch(path, Object.assign({
+    headers: {
+      'Authorization': 'Bearer ' + SECRET_KEY,
+      'Content-Type': 'application/json',
+      // A fresh key per action. Reusing one across different requests is what the 422
+      // "idempotency_key_reused" error exists to catch.
+      'Idempotency-Key': crypto.randomUUID()
+    }
+  }, options));
+  const body = await response.json();
+  if (!response.ok) throw body.error || body;
+  return body;
+}
+
+// --- tabs ------------------------------------------------------------------
+document.querySelectorAll('.tabs button').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-selected', 'false'));
+    tab.setAttribute('aria-selected', 'true');
+    method = tab.dataset.method;
+    ['card', 'upi', 'wallet'].forEach(m => { $('pane-' + m).hidden = m !== method; });
+    if (method === 'upi') { $('currency').value = 'INR'; }
+  };
+});
+
+// --- test instrument chips -------------------------------------------------
+fetch('/v1/public/test_instruments').then(r => r.json()).then(data => {
+  data.cards.forEach(card => {
+    const chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.textContent = card.number.slice(-4) + ' · ' + card.note.split('—')[0].trim();
+    chip.title = card.number + ' — ' + card.note;
+    chip.onclick = () => { $('number').value = card.number; };
+    $('card-chips').appendChild(chip);
+  });
+  data.upi.forEach(entry => {
+    const chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.textContent = entry.vpa;
+    chip.onclick = () => { $('vpa').value = entry.vpa; };
+    $('upi-chips').appendChild(chip);
+  });
+});
+
+// --- the payment flow ------------------------------------------------------
+$('pay').onclick = async () => {
+  $('pay').disabled = true;
+  stepsEl.innerHTML = '';
+  setActions(false);
+
+  try {
+    // 1. Tokenise in the browser. This is the only place the card number exists.
+    step('Tokenising the instrument in the browser');
+    const details = method === 'card'
+      ? { type: 'card', card: {
+          number: $('number').value,
+          exp_month: parseInt($('exp-month').value, 10),
+          exp_year: parseInt($('exp-year').value, 10),
+          cvc: $('cvc').value
+        } }
+      : method === 'upi'
+        ? { type: 'upi', upi: { vpa: $('vpa').value } }
+        : { type: 'wallet', wallet: { provider: $('provider').value } };
+
+    const tokenised = await mockpay.createPaymentMethod(details);
+    if (tokenised.error) throw tokenised.error;
+    step('Token issued: ' + tokenised.paymentMethod.id, 'ok');
+
+    // 2. Create the intent. On a real site this happens on your server.
+    step('Creating the PaymentIntent (server-side in production)');
+    const intent = await api('/v1/payment_intents', {
+      method: 'POST',
+      body: JSON.stringify({
+        amount: parseInt($('amount').value, 10),
+        currency: $('currency').value,
+        capture_method: $('capture').value,
+        description: 'AirPods Pro',
+        statement_descriptor: 'DEMO STORE'
+      })
+    });
+    currentIntent = intent;
+    step('Intent ' + intent.id + ' → ' + intent.status);
+
+    // 3. Confirm from the browser, and let the SDK handle any challenge.
+    step('Confirming — risk scoring, authentication, then the rail');
+    show('Contacting the issuer…', 'busy');
+
+    const result = await mockpay.confirmPayment({
+      clientSecret: intent.client_secret,
+      paymentMethod: tokenised.paymentMethod.id,
+      onAction: (action) => {
+        step('Rail needs the customer: ' + action.type, 'warn');
+        show('Waiting for the customer to authenticate (OTP is 123456)…', 'busy');
+      }
+    });
+
+    const final = await api('/v1/payment_intents/' + intent.id);
+    currentIntent = final;
+    dump(final);
+
+    if (result.error) {
+      step('Ended: ' + (result.error.decline_code || result.error.code), 'bad');
+      show(result.error.message, 'bad');
+    } else if (final.status === 'requires_capture') {
+      step('Authorised — funds held, not yet claimed', 'ok');
+      show('Authorised. The hold is on the card; capture it when you ship.', 'ok');
+    } else {
+      step('Succeeded — auth code ' + (final.authorization_code || 'n/a'), 'ok');
+      show('Payment succeeded.', 'ok');
+    }
+    setActions(true);
+  } catch (error) {
+    dump(error);
+    step('Failed: ' + (error.code || 'error'), 'bad');
+    show(error.message || 'Something went wrong.', 'bad');
+  } finally {
+    $('pay').disabled = false;
+  }
+};
+
+function setActions(enabled) {
+  const succeeded = enabled && currentIntent && currentIntent.status === 'succeeded';
+  const authorised = enabled && currentIntent && currentIntent.status === 'requires_capture';
+  $('btn-capture').disabled = !authorised;
+  $('btn-refund').disabled = !succeeded;
+  $('btn-cancel').disabled = !authorised;
+  $('btn-dispute').disabled = !succeeded;
+  $('btn-trace').disabled = !enabled || !currentIntent;
+}
+
+$('btn-capture').onclick = () => act('Capturing the authorised funds',
+  () => api('/v1/payment_intents/' + currentIntent.id + '/capture', { method: 'POST', body: '{}' }));
+
+$('btn-refund').onclick = () => act('Refunding — a new transaction, not an undo',
+  () => api('/v1/refunds', {
+    method: 'POST',
+    body: JSON.stringify({ payment_intent: currentIntent.id, reason: 'requested_by_customer' })
+  }));
+
+$('btn-cancel').onclick = () => act('Reversing the authorisation so the hold drops immediately',
+  () => api('/v1/payment_intents/' + currentIntent.id + '/cancel', { method: 'POST', body: '{}' }));
+
+$('btn-dispute').onclick = () => act('Filing a chargeback — funds are pulled back straight away',
+  () => api('/v1/disputes', {
+    method: 'POST',
+    body: JSON.stringify({ payment_intent: currentIntent.id, reason_code: '10.4' })
+  }));
+
+async function act(label, fn) {
+  step(label);
+  try {
+    const result = await fn();
+    dump(result);
+    const refreshed = await api('/v1/payment_intents/' + currentIntent.id);
+    currentIntent = refreshed;
+    step('Done → ' + (result.status || refreshed.status), 'ok');
+    show('Done.', 'ok');
+    setActions(true);
+  } catch (error) {
+    dump(error);
+    step('Failed: ' + (error.code || 'error'), 'bad');
+    show(error.message || 'Failed.', 'bad');
+  }
+}
+
+$('btn-trace').onclick = async () => {
+  const trace = await api('/v1/payment_intents/' + currentIntent.id + '/transactions');
+  const rendered = trace.data.map(t =>
+    `━━ ${t.type.toUpperCase()} · ${t.outcome} · ${t.rail} · ${t.latency_ms}ms\n`
+    + `   DE39 ${t.response_code || '—'}  ${t.response_text || ''}\n\n`
+    + `REQUEST\n${t.request || '(none)'}\n`
+    + `RESPONSE\n${t.response || '(none)'}\n`
+  ).join('\n');
+  dump(rendered || 'No transactions recorded.');
+};
+</script>
+</body>
+</html>

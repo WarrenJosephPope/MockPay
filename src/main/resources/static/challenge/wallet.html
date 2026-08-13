@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Approve payment</title>
+<style>
+  body { margin:0; background:#eef1f6; color:#12151c; font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .sheet { max-width:400px; margin:0 auto; min-height:100vh; background:#fff; padding:26px 24px; }
+  .brand { display:flex; align-items:center; gap:9px; padding-bottom:16px; border-bottom:1px solid #e3e6ec; }
+  .mark { width:30px; height:30px; border-radius:50%; background:#003087; color:#fff; display:grid; place-items:center; font-weight:700; font-size:13px; }
+  .brand b { font-size:14px; } .brand span { color:#6b7280; font-size:12px; display:block; }
+  h1 { font-size:17px; margin:22px 0 6px; }
+  p.lead { color:#5d6675; font-size:14px; margin:0 0 20px; }
+  .box { background:#f6f7f9; border:1px solid #e3e6ec; border-radius:9px; padding:15px; margin-bottom:8px; }
+  .box .amt { font-size:24px; font-weight:650; letter-spacing:-.02em; }
+  .box .to { color:#6b7280; font-size:13px; margin-top:2px; }
+  .bal { display:flex; justify-content:space-between; padding:13px 15px; border:1px solid #e3e6ec; border-radius:9px; margin-bottom:18px; font-size:13.5px; }
+  .bal b { font-weight:600; }
+  button { width:100%; padding:13px; border:0; border-radius:9px; font:600 15px/1 inherit; cursor:pointer; margin-top:10px; }
+  .pay { background:#003087; color:#fff; }
+  .cancel { background:transparent; color:#6b7280; font-weight:400; font-size:13.5px; }
+  .msg { margin-top:14px; padding:11px 13px; border-radius:8px; font-size:13.5px; display:none; }
+  .msg.show { display:block; }
+  .msg.bad { background:#fee; border:1px solid #fbb; color:#a11; }
+  .msg.ok { background:#eafaf1; border:1px solid #a8e6c5; color:#127a4a; }
+  .hint { margin-top:22px; padding-top:14px; border-top:1px solid #e3e6ec; color:#8b94a3; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="sheet">
+  <div class="brand">
+    <div class="mark">MW</div>
+    <div><b>MockWallet</b><span>Secure payment approval</span></div>
+  </div>
+
+  <h1>Approve this payment</h1>
+  <p class="lead">You're signed in as demo@mockwallet.test</p>
+
+  <div class="box">
+    <div class="amt" id="amount">&mdash;</div>
+    <div class="to">to <span id="merchant">&mdash;</span></div>
+  </div>
+
+  <div class="bal"><span>Wallet balance</span><b>$ 250.00</b></div>
+
+  <button class="pay" id="approve">Pay now</button>
+  <button class="cancel" id="cancel">Cancel and return to the merchant</button>
+
+  <div class="msg" id="msg"></div>
+
+  <div class="hint">
+    <b>This page is the simulator.</b> In production the customer has left the merchant's site
+    entirely and is on the wallet's own domain. This is exactly where checkouts leak: people pay and
+    then close the tab. The merchant must learn the outcome from the webhook, never from the
+    browser coming back.
+  </div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const actionId = params.get('action');
+const msg = document.getElementById('msg');
+let returnUrl = null;
+
+function say(text, kind) {
+  msg.className = 'msg show ' + kind;
+  msg.textContent = text;
+}
+
+fetch('/v1/public/challenge/' + actionId)
+  .then(r => r.json())
+  .then(ctx => {
+    const minor = ctx.currency === 'JPY' ? ctx.amount : (ctx.amount / 100).toFixed(2);
+    document.getElementById('amount').textContent = ctx.currency + ' ' + minor;
+    document.getElementById('merchant').textContent = ctx.merchant_name;
+    returnUrl = ctx.return_url;
+    if (!ctx.usable) say('This session has expired.', 'bad');
+  })
+  .catch(() => say('Could not load this payment.', 'bad'));
+
+async function respond(approve) {
+  document.getElementById('approve').disabled = true;
+  try {
+    const response = await fetch('/v1/public/challenge/wallet/' + actionId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approve: approve })
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      say(body.error.message, 'bad');
+      document.getElementById('approve').disabled = false;
+      return;
+    }
+    say(approve ? 'Paid. Returning you to the merchant…' : 'Cancelled.', approve ? 'ok' : 'bad');
+    setTimeout(() => {
+      if (returnUrl && window.opener == null) { location.href = returnUrl; } else { window.close(); }
+    }, 900);
+  } catch (e) {
+    say('Network error.', 'bad');
+    document.getElementById('approve').disabled = false;
+  }
+}
+
+document.getElementById('approve').onclick = () => respond(true);
+document.getElementById('cancel').onclick = () => respond(false);
+</script>
+</body>
+</html>

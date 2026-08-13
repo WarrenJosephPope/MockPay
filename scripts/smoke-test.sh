@@ -23,6 +23,7 @@ chk() {
   if echo "$2" | grep -q "$3"; then echo "  PASS  $1"; PASS=$((PASS+1));
   else echo "  FAIL  $1"; echo "        want ~ $3"; echo "        got:  $(echo "$2" | head -c 300)"; FAIL=$((FAIL+1)); fi
 }
+# $1 method  $2 path  $3 body ('' for none)  $4 key (defaults to $SK)
 api()  { curl -s -X "$1" "$B$2" -H "Authorization: Bearer ${4:-$SK}" -H 'Content-Type: application/json' ${3:+-d "$3"}; }
 apik() { curl -s -X POST "$B$1" -H "Authorization: Bearer $SK" -H 'Content-Type: application/json' -H "Idempotency-Key: $3" -d "$2"; }
 field() { python -c "import sys,json
@@ -212,6 +213,68 @@ r=$(api POST /v1/payment_intents '{"amount":5000,"currency":"USD"}')
 CS=$(echo "$r" | field client_secret); PIC=$(echo "$r" | field id)
 chk "client secret works" "$(curl -s "$B/v1/public/payment_intents/$PIC?client_secret=$CS")" '"status":"requires_payment_method"'
 chk "wrong client secret rejected" "$(curl -s "$B/v1/public/payment_intents/$PIC?client_secret=bogus")" "invalid_client_secret"
+
+echo; echo "=== 19. API key management ==="
+r=$(api GET /v1/api_keys)
+chk "keys listed" "$r" '"object":"api_key"'
+chk "secret key value never returned in a list" "$(echo "$r" | grep -c 'sk_test_demo_us_secret')" '^0$'
+chk "prefix shown for identification" "$r" '"prefix":"sk_test_demo_us_"'
+chk "publishable key returned in full" "$r" 'pk_test_demo_us_publishable'
+
+r=$(api POST /v1/api_keys '{"type":"secret","name":"rotation test"}')
+NEWKEY=$(echo "$r" | field key); NEWKEYID=$(echo "$r" | field id)
+chk "new secret returned once at creation" "$r" '"key":"sk_test_'
+chk "creation warns it is unrecoverable" "$r" 'cannot be retrieved again'
+chk "the brand-new key authenticates" "$(api GET /v1/account '' $NEWKEY)" "acct_demo_us"
+chk "listing it again hides the value" "$(api GET /v1/api_keys | grep -c "$NEWKEY")" '^0$'
+
+chk "revoking works" "$(api POST /v1/api_keys/$NEWKEYID/revoke '{}')" '"revoked_at":[0-9]'
+chk "revoked key is rejected" "$(api GET /v1/account '' $NEWKEY)" "invalid_api_key"
+chk "original key still works" "$(api GET /v1/account)" "acct_demo_us"
+K1=$(api GET /v1/api_keys | python -c "
+import sys,json
+d=json.load(sys.stdin)['data']
+print(next(k['id'] for k in d if k['type']=='secret' and not k.get('revoked_at')))")
+chk "cannot revoke the last secret key" "$(api POST /v1/api_keys/$K1/revoke '{}')" "cannot_revoke_last_key"
+
+echo; echo "=== 20. Webhook endpoints ==="
+r=$(api GET /v1/webhook_endpoints)
+chk "seeded endpoint present" "$r" '"object":"webhook_endpoint"'
+chk "endpoint has its own secret" "$r" '"secret":"whsec_'
+chk "no filter means all events" "$r" '"enabled_events":\["\*"\]'
+
+r=$(api POST /v1/webhook_endpoints "{\"url\":\"$B/webhook-sink\",\"description\":\"second endpoint\",\"enabled_events\":[\"payment_intent.succeeded\"]}")
+EP2=$(echo "$r" | field id)
+chk "second endpoint created" "$r" '"object":"webhook_endpoint"'
+chk "event filter recorded" "$r" 'payment_intent.succeeded'
+S1=$(api GET /v1/webhook_endpoints | python -c "
+import sys,json
+d=json.load(sys.stdin)['data']
+print(len({e['secret'] for e in d}), len(d))")
+chk "each endpoint has a distinct secret" "$S1" '^2 2$'
+
+curl -s -X DELETE $B/webhook-sink/received >/dev/null
+pm=$(api POST /v1/payment_methods '{"type":"card","card":{"number":"4242424242424242","exp_month":12,"exp_year":2030,"cvc":"123"}}' | field id)
+api POST /v1/payment_intents "{\"amount\":4444,\"currency\":\"USD\",\"payment_method\":\"$pm\",\"confirm\":true}" >/dev/null
+sleep 6
+FAN=$(curl -s $B/webhook-sink/received | python -c "
+import sys,json
+evs=json.load(sys.stdin)['events']
+succ=[e for e in evs if e['type']=='payment_intent.succeeded']
+crea=[e for e in evs if e['type']=='payment_intent.created']
+print(len(succ), len(crea))")
+chk "succeeded fanned out to BOTH endpoints" "$FAN" '^2 '
+chk "created went only to the unfiltered endpoint" "$FAN" ' 1$'
+chk "every delivery verified its own signature" "$(curl -s $B/webhook-sink/received | grep -c 'signature verification failed')" '^0$'
+
+chk "disabling an endpoint stops delivery" "$(api PATCH /v1/webhook_endpoints/$EP2 '{"enabled":false}')" '"enabled":false'
+chk "endpoint deleted" "$(api DELETE /v1/webhook_endpoints/$EP2 '{}')" '"deleted":true'
+chk "back to one endpoint" "$(api GET /v1/webhook_endpoints | python -c "import sys,json;print(len(json.load(sys.stdin)['data']))")" '^1$'
+
+echo; echo "=== 21. Tenant isolation on the new resources ==="
+chk "cannot list another merchant's keys" "$(api GET /v1/api_keys '' $SK_IN | grep -c 'demo_us')" '^0$'
+chk "cannot revoke another merchant's key" "$(api POST /v1/api_keys/$K1/revoke '{}' $SK_IN)" "resource_missing"
+chk "cannot read another merchant's endpoint" "$(api GET /v1/webhook_endpoints/whe_nope '' $SK_IN)" "resource_missing"
 
 echo; echo "======================================"
 echo "  PASS: $PASS   FAIL: $FAIL"

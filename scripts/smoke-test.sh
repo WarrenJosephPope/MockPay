@@ -60,6 +60,21 @@ dpost()   { curl -s -b "$3" -c "$3" -X POST "$B$1" -H 'Content-Type: application
 dpatch()  { curl -s -b "$3" -c "$3" -X PATCH "$B$1" -H 'Content-Type: application/json' -H "X-XSRF-TOKEN: $(csrf "$3")" -d "$2"; }
 ddelete() { curl -s -b "$2" -c "$2" -X DELETE "$B$1" -H "X-XSRF-TOKEN: $(csrf "$2")"; }
 
+# Wait for the app to be genuinely ready, not merely listening.
+#
+# Seeding runs in an ApplicationRunner, which fires *after* the web server starts accepting
+# requests. Probing an endpoint that needs no account (say /v1/public/test_instruments) therefore
+# returns 200 while the demo keys do not yet exist, and the first assertions fail intermittently.
+# Probe something that requires the seed instead.
+printf "waiting for %s " "$B"
+for _ in $(seq 1 60); do
+  if curl -s "$B/v1/account" -H "Authorization: Bearer $SK" 2>/dev/null | grep -q '"object":"account"'; then
+    echo "ready"; break
+  fi
+  printf "."; sleep 1
+done
+echo
+
 echo "=== 1. Authentication ==="
 chk "no key -> 401" "$(curl -s $B/v1/account)" "no_api_key"
 chk "publishable key rejected" "$(curl -s $B/v1/account -H "Authorization: Bearer $PK")" "publishable_key_not_allowed"
@@ -442,6 +457,90 @@ chk "the post-reset session works" "$(dget /dashboard/me $NJ)" '"role":"OWNER"'
 
 echo; echo "=== 33. Emailed tokens are stored hashed ==="
 chk "invitation token returned only while SMTP is unset" "$(dpost /dashboard/team/invitations "{\"email\":\"hashcheck+$(date +%s)@acme.test\",\"role\":\"VIEWER\"}" $DJ)" "no SMTP host is configured"
+
+echo; echo "=== 34. Dashboard account profile ==="
+chk "account readable" "$(dget /dashboard/account $DJ)" '"object":"account"'
+chk "immutable fields advertised" "$(dget /dashboard/account $DJ)" 'settlement_currency'
+chk "name is editable" "$(dpatch /dashboard/account '{"name":"Acme Renamed Ltd"}' $DJ)" 'Acme Renamed Ltd'
+chk "mcc is editable" "$(dpatch /dashboard/account '{"mcc":"5812"}' $DJ)" '"mcc":"5812"'
+chk "bad mcc rejected" "$(dpatch /dashboard/account '{"mcc":"58"}' $DJ)" "invalid_mcc"
+chk "currency cannot be changed" "$(dpatch /dashboard/account '{"settlement_currency":"USD"}' $DJ)" "currency_immutable"
+chk "country cannot be changed" "$(dpatch /dashboard/account '{"country":"US"}' $DJ)" "country_immutable"
+chk "DEVELOPER cannot edit the account" "$(dpatch /dashboard/account '{"name":"nope"}' /tmp/mp_developer.txt)" "insufficient_role"
+
+echo; echo "=== 35. Payment filters ==="
+# Three payments with distinct amounts and cards, on the signup account.
+pm1=$(api POST /v1/payment_methods '{"type":"card","card":{"number":"4242424242424242","exp_month":12,"exp_year":2030,"cvc":"123"}}' $NEWSK | field id)
+pm2=$(api POST /v1/payment_methods '{"type":"card","card":{"number":"5555555555554444","exp_month":12,"exp_year":2030,"cvc":"123"}}' $NEWSK | field id)
+api POST /v1/payment_intents "{\"amount\":1100,\"currency\":\"GBP\",\"payment_method\":\"$pm1\",\"confirm\":true,\"description\":\"Blue widget\"}" $NEWSK >/dev/null
+api POST /v1/payment_intents "{\"amount\":9900,\"currency\":\"GBP\",\"payment_method\":\"$pm2\",\"confirm\":true,\"description\":\"Red widget\",\"customer\":\"cust_zeta\"}" $NEWSK >/dev/null
+pmf=$(api POST /v1/payment_methods '{"type":"card","card":{"number":"4000000000000002","exp_month":12,"exp_year":2030,"cvc":"123"}}' $NEWSK | field id)
+api POST /v1/payment_intents "{\"amount\":2200,\"currency\":\"GBP\",\"payment_method\":\"$pmf\",\"confirm\":true,\"description\":\"Doomed widget\"}" $NEWSK >/dev/null
+
+count() { python -c "import sys,json;print(json.load(sys.stdin).get('total_count','?'))"; }
+ALL=$(dget /dashboard/payments $DJ | count)
+chk "unfiltered list returns everything ($ALL)" "$ALL" '^[3-9]'
+chk "filter by status=succeeded"   "$(dget '/dashboard/payments?status=succeeded' $DJ | count)" '^[2-9]'
+chk "filter by status=failed"      "$(dget '/dashboard/payments?status=failed' $DJ | count)" '^[1-9]'
+chk "invalid status rejected"      "$(dget '/dashboard/payments?status=nonsense' $DJ)" "invalid_status"
+chk "amount_min excludes smaller"  "$(dget '/dashboard/payments?amount_min=9000' $DJ | count)" '^1$'
+chk "amount_max excludes larger"   "$(dget '/dashboard/payments?amount_max=1500' $DJ | count)" '^1$'
+chk "amount range brackets one"    "$(dget '/dashboard/payments?amount_min=2000&amount_max=3000' $DJ | count)" '^1$'
+chk "last4 narrows to one card"    "$(dget '/dashboard/payments?last4=4444' $DJ | count)" '^1$'
+chk "unknown last4 returns none"   "$(dget '/dashboard/payments?last4=0000' $DJ | count)" '^0$'
+chk "free-text finds description"  "$(dget '/dashboard/payments?query=Red%20widget' $DJ | count)" '^1$'
+chk "free-text finds customer ref" "$(dget '/dashboard/payments?query=cust_zeta' $DJ | count)" '^1$'
+TODAY_UTC=$(python -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).date())")
+chk "today's range includes today" "$(dget "/dashboard/payments?created_from=$TODAY_UTC&created_to=$TODAY_UTC" $DJ | count)" '^[1-9]'
+chk "a past day excludes today"    "$(dget '/dashboard/payments?created_from=2020-01-01&created_to=2020-01-02' $DJ | count)" '^0$'
+chk "bad date rejected"            "$(dget '/dashboard/payments?created_from=notadate' $DJ)" "invalid_date"
+chk "filters compose"              "$(dget '/dashboard/payments?status=succeeded&amount_min=9000&last4=4444' $DJ | count)" '^1$'
+chk "rival sees nothing through filters" "$(dget '/dashboard/payments?last4=4444' $OJ | count)" '^0$'
+
+echo; echo "=== 36. Payment detail carries the trace and the ledger ==="
+PID=$(dget '/dashboard/payments?amount_min=9000' $DJ | python -c "import sys,json;print(json.load(sys.stdin)['data'][0]['id'])")
+DET=$(dget /dashboard/payments/$PID $DJ)
+chk "detail includes full transactions" "$DET" '"object":"transaction"'
+chk "detail includes the 0100 request"  "$DET" 'MTI  0100'
+chk "detail includes DE39"              "$DET" 'DE39'
+chk "detail includes ledger journals"   "$DET" 'SCHEME_RECEIVABLE'
+chk "detail includes refunds array"     "$DET" '"refunds"'
+chk "rival cannot read that payment"    "$(dget /dashboard/payments/$PID $OJ)" "resource_missing"
+
+echo; echo "=== 37. Test a webhook endpoint ==="
+curl -s -X DELETE $B/webhook-sink/received >/dev/null
+EPT=$(dpost /dashboard/webhook-endpoints "{\"url\":\"$B/webhook-sink\",\"description\":\"test target\"}" $DJ | field id)
+chk "test event queued" "$(dpost /dashboard/webhook-endpoints/$EPT/test '{}' $DJ)" '"status":"queued"'
+sleep 6
+chk "test event actually delivered" "$(curl -s $B/webhook-sink/received)" "endpoint.test"
+chk "test event signature verified" "$(curl -s $B/webhook-sink/received | grep -c 'signature verification failed')" '^0$'
+chk "DEVELOPER may send a test" "$(dpost /dashboard/webhook-endpoints/$EPT/test '{}' /tmp/mp_developer.txt)" '"status":"queued"'
+# A fresh VIEWER: the one from section 25 was removed from the team in section 30.
+VTOK=$(dpost /dashboard/team/invitations "{\"email\":\"viewer2+$(date +%s)@acme.test\",\"role\":\"VIEWER\"}" $DJ | field token)
+V2=/tmp/mp_viewer2.txt; rm -f $V2
+curl -s -c $V2 -X POST $B/dashboard/auth/accept-invitation -H 'Content-Type: application/json'   -d "{\"token\":\"$VTOK\",\"password\":\"$PW\",\"name\":\"Viewer Two\"}" >/dev/null
+chk "VIEWER may not send a test" "$(dpost /dashboard/webhook-endpoints/$EPT/test '{}' $V2)" "insufficient_role"
+chk "unknown endpoint -> 404" "$(dpost /dashboard/webhook-endpoints/whe_nope/test '{}' $DJ)" "resource_missing"
+
+echo; echo "=== 37b. Security denials use the standard error envelope ==="
+chk "missing CSRF token -> our error shape" "$(curl -s -b $DJ -X POST $B/dashboard/api-keys -H 'Content-Type: application/json' -d '{"type":"secret"}')" '"code":"access_denied"'
+chk "and explains how to fix it" "$(curl -s -b $DJ -X POST $B/dashboard/api-keys -H 'Content-Type: application/json' -d '{"type":"secret"}')" "X-XSRF-TOKEN"
+
+echo; echo "=== 38. Idempotency on dashboard mutations ==="
+IK=$(python -c "import uuid;print(uuid.uuid4())")
+dkey() { curl -s -b "$3" -c "$3" -X POST "$B$1" -H 'Content-Type: application/json' -H "X-XSRF-TOKEN: $(csrf "$3")" -H "Idempotency-Key: $4" -d "$2"; }
+K1=$(dkey /dashboard/api-keys '{"type":"secret","name":"double click"}' $DJ "$IK" | field id)
+K2=$(dkey /dashboard/api-keys '{"type":"secret","name":"double click"}' $DJ "$IK" | field id)
+if [ -n "$K1" ] && [ "$K1" = "$K2" ]; then echo "  PASS  double-clicked key creation yields ONE key ($K1)"; PASS=$((PASS+1));
+else echo "  FAIL  created two keys: $K1 vs $K2"; FAIL=$((FAIL+1)); fi
+
+RIK=$(python -c "import uuid;print(uuid.uuid4())")
+SPI=$(dget '/dashboard/payments?status=succeeded&amount_min=9000' $DJ | python -c "import sys,json;print(json.load(sys.stdin)['data'][0]['id'])")
+R1=$(dkey /dashboard/refunds "{\"payment_intent\":\"$SPI\",\"amount\":100}" /tmp/mp_admin.txt "$RIK" | field id)
+R2=$(dkey /dashboard/refunds "{\"payment_intent\":\"$SPI\",\"amount\":100}" /tmp/mp_admin.txt "$RIK" | field id)
+if [ -n "$R1" ] && [ "$R1" = "$R2" ]; then echo "  PASS  double-clicked refund charges ONCE ($R1)"; PASS=$((PASS+1));
+else echo "  FAIL  created two refunds: $R1 vs $R2"; FAIL=$((FAIL+1)); fi
+chk "same key, different body -> 422" "$(dkey /dashboard/api-keys '{"type":"publishable","name":"different"}' $DJ "$IK")" "idempotency_key_reused"
 
 echo; echo "======================================"
 echo "  PASS: $PASS   FAIL: $FAIL"

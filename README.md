@@ -26,6 +26,21 @@ Requires **Java 17+**.
 
 H2 in memory. Everything is wiped when the process exits. Good for the demo and the test suite.
 
+### Seeing the emails
+
+With no `MOCKPAY_SMTP_HOST` set, nothing is sent — each message is written to the log in full,
+link included, so the flows work with no mail server at all.
+
+For a real inbox, `docker-compose.dev.yml` includes [Mailpit](https://mailpit.axllent.org/):
+
+```bash
+docker compose -f docker-compose.dev.yml up -d
+MOCKPAY_SMTP_HOST=localhost MOCKPAY_SMTP_PORT=1025 ./mvnw spring-boot:run -Dspring-boot.run.profiles=postgres
+```
+
+Then read the mail at **<http://localhost:8025>**. For a real provider, set the host, port,
+username, password, and turn on `MOCKPAY_SMTP_AUTH` and `MOCKPAY_SMTP_STARTTLS`.
+
 ### 2. Development — Postgres in Docker, app from the CLI
 
 Requires **Java 17+** and **Docker**. This is the day-to-day loop: fast rebuilds, a debugger, live
@@ -54,6 +69,7 @@ Whichever you pick, open **<http://localhost:8088/>** for the demo checkout.
 | Webhook sink | <http://localhost:8088/webhook-sink/received> |
 | H2 console | <http://localhost:8088/h2-console> — option 1 only (JDBC `jdbc:h2:mem:mockpay`, user `sa`, no password) |
 | Postgres | `localhost:5433`, db/user/password all `mockpay` — options 2 and 3 |
+| Mailpit inbox | <http://localhost:8025> — only when SMTP is pointed at it |
 
 ### Stopping and wiping
 
@@ -88,7 +104,39 @@ Secret keys are stored as **SHA-256 hashes**. Even the seeded ones: `sk_test_dem
 because its *hash* is what was written. A new key's value is returned exactly once, by the call that
 creates it, and cannot be recovered afterwards.
 
-### Creating a real account
+### Signing up
+
+There is a dashboard API with real accounts, sessions and roles:
+
+```bash
+# Register a person and the business they own; returns the API keys once
+curl -s -c jar.txt -X POST http://localhost:8088/dashboard/auth/signup \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"correct horse battery staple",
+       "name":"You","business_name":"Acme Ltd","currency":"GBP","country":"GB"}'
+
+curl -s -b jar.txt http://localhost:8088/dashboard/me
+```
+
+Mutating dashboard calls need a CSRF token — read the `XSRF-TOKEN` cookie and echo it back in the
+`X-XSRF-TOKEN` header. `scripts/smoke-test.sh` has a four-line implementation.
+
+**Roles.** OWNER manages the team · ADMIN issues keys and refunds · DEVELOPER configures
+integrations but **cannot move money** · VIEWER is read-only. Every mutation is written to an audit
+log with the actor, their IP, and their user agent.
+
+### Forgotten passwords and invitations
+
+Both are emailed. `POST /dashboard/auth/forgot-password` always returns the same response whether or
+not the address is registered — otherwise it becomes a way to discover who has an account.
+
+Completing a reset **signs the user out everywhere**. That is the point of resetting after a scare:
+anyone holding a stolen session loses it immediately. A stateless token could not do that.
+
+Reset links live one hour, invitation links seven days, and both are single-use. Only their SHA-256
+hashes are stored, so a database leak yields no working links.
+
+### Creating an account without a browser
 
 With seeding off, an empty database has no accounts — and you cannot authenticate to create one.
 The bootstrap command breaks that circle:
@@ -235,6 +283,22 @@ lose every payment that needed a 3-D Secure challenge.
 | `GET` | `/v1/events` | The webhook outbox: attempts, backoff, errors |
 | `POST` | `/v1/events/{id}/replay` | |
 | `GET` | `/v1/account` · `GET /v1/account/balance` | |
+
+### Dashboard (session cookie, not API key)
+
+| Method | Path | Minimum role |
+|---|---|---|
+| `POST` | `/dashboard/auth/signup` · `/login` · `/logout` · `/accept-invitation` | — |
+| `POST` | `/dashboard/auth/forgot-password` · `/reset-password` | — |
+| `GET` | `/dashboard/me` · `POST /dashboard/switch-account` | any |
+| `GET` | `/dashboard/payments` · `/dashboard/payments/{id}` | VIEWER |
+| `GET` | `/dashboard/team` | VIEWER |
+| `GET`/`POST`/`PATCH`/`DELETE` | `/dashboard/webhook-endpoints` | DEVELOPER |
+| `GET` | `/dashboard/api-keys` · `/dashboard/events` · `POST /dashboard/events/{id}/replay` | DEVELOPER |
+| `POST` | `/dashboard/api-keys` · `/dashboard/api-keys/{id}/revoke` | ADMIN |
+| `POST` | `/dashboard/refunds` | ADMIN |
+| `GET` | `/dashboard/audit-log` | ADMIN |
+| `POST`/`PATCH`/`DELETE` | `/dashboard/team/**` | OWNER |
 
 ### API keys
 
@@ -384,6 +448,13 @@ Replay with `POST /v1/events/{id}/replay`.
 | Chargeback lifecycle with Visa reason codes | `service/DisputeService.java` |
 | Net settlement, T+2 business days, payouts | `service/SettlementService.java` |
 | Key separation, rate limiting, tenant isolation | `api/ApiKeyFilter.java` |
+| Three coexisting auth schemes, CSRF where it matters | `config/SecurityConfig.java` |
+| Argon2 passwords, lockout, uniform login errors | `service/UserService.java` |
+| Roles and per-endpoint authority | `domain/Membership.java`, `api/DashboardController.java` |
+| Append-only audit trail | `service/AuditService.java` |
+| Password reset, hashed single-use tokens | `service/UserService.java`, `domain/PasswordResetToken.java` |
+| Email with a console fallback | `service/EmailService.java` |
+| Sign out everywhere | `service/SessionRegistry.java` |
 | Hashed API keys, rotation, revocation | `service/ApiKeyService.java` |
 | Multi-endpoint webhooks with event filtering | `domain/WebhookEndpoint.java`, `service/EventService.java` |
 | Account creation and bootstrap | `service/AccountService.java`, `config/BootstrapRunner.java` |
@@ -395,7 +466,7 @@ Hover over a type in your IDE to read it.
 
 ## Testing
 
-123 end-to-end assertions across every flow:
+186 end-to-end assertions across every flow:
 
 ```bash
 bash scripts/smoke-test.sh
@@ -433,6 +504,13 @@ containers. Running from the CLI, export them or let the defaults apply. `.env` 
 | `MOCKPAY_RAIL_MAX_LATENCY_MS` | `400` | Raise it to exercise your own timeout handling |
 | `MOCKPAY_PRICING_CARD_BPS` | `200` | 200 bps = 2.00% |
 | `MOCKPAY_SETTLEMENT_DELAY_DAYS` | `2` | T+N **business** days from capture to payout |
+| `MOCKPAY_SETTLEMENT_ZONE` | `UTC` | Which timezone the settlement *day* is measured in |
+| `MOCKPAY_COOKIE_SECURE` | `false` | Set true behind TLS; the browser drops secure cookies on plain HTTP |
+| `MOCKPAY_SESSION_TIMEOUT` | `8h` | Dashboard session lifetime |
+| `MOCKPAY_SMTP_HOST` | *(empty)* | **Empty means emails are written to the log instead of sent** |
+| `MOCKPAY_SMTP_PORT` / `_USERNAME` / `_PASSWORD` | `1025` / — / — | SMTP credentials |
+| `MOCKPAY_SMTP_AUTH` / `_STARTTLS` | `false` | Turn both on for a real provider |
+| `MOCKPAY_MAIL_FROM` | `MockPay <no-reply@mockpay.local>` | Must match an authenticated domain |
 | `MOCKPAY_WEBHOOK_BACKOFF_SECONDS` | `5,30,120,600,3600,21600` | Retry schedule, one entry per attempt |
 
 `GATEWAY_PORT` is the one worth understanding: change it and the published port, the container's own
@@ -484,7 +562,7 @@ gateway-service/
 ├── docker-compose.yml          Postgres + the gateway
 ├── docker-compose.dev.yml      Postgres only; run the app from the CLI
 ├── Dockerfile                  multi-stage build, non-root runtime
-├── scripts/smoke-test.sh       123 end-to-end assertions
+├── scripts/smoke-test.sh       186 end-to-end assertions
 ├── volumes/postgres/           bind-mounted database files (gitignored)
 └── src/main/
     ├── java/dev/mockpay/gateway/

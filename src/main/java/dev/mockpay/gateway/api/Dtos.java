@@ -4,6 +4,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 
+import java.util.List;
 import java.util.Map;
 
 /** Request bodies. Validation lives on the boundary so nothing malformed reaches the domain. */
@@ -74,5 +75,22 @@ public final class Dtos {
     }
 
     public record UpdateWebhookRequest(@NotBlank String url) {
+    }
+
+    public record CreateApiKeyRequest(String type, String name) {
+    }
+
+    /** {@code enabled_events} null or empty means every event type. */
+    public record CreateWebhookEndpointRequest(
+            @NotBlank String url,
+            String description,
+            List<String> enabled_events) {
+    }
+
+    public record UpdateWebhookEndpointRequest(
+            String url,
+            String description,
+            List<String> enabled_events,
+            Boolean enabled) {
     }
 }

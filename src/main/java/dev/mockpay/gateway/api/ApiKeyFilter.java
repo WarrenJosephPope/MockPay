@@ -1,7 +1,9 @@
 package dev.mockpay.gateway.api;
 
+import dev.mockpay.gateway.domain.ApiKey;
 import dev.mockpay.gateway.domain.Merchant;
 import dev.mockpay.gateway.repo.MerchantRepository;
+import dev.mockpay.gateway.service.ApiKeyService;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -26,6 +28,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * client secret for. A <b>secret key</b> never leaves a server and can move money. Keeping them
  * distinct is what makes it safe for a payment form to exist in JavaScript at all.
  *
+ * <p>Keys are now resolved by hash against the {@code api_keys} table rather than compared as
+ * plaintext columns on the merchant, so a leaked database dump does not hand over the account.
+ *
  * <p>Rate limiting sits here rather than deeper in because the traffic worth rejecting is the
  * traffic you want to reject <em>cheaply</em>. Card testing — a fraudster running stolen numbers
  * through a merchant's checkout to see which still work — looks exactly like a burst of
@@ -38,10 +43,12 @@ public class ApiKeyFilter extends OncePerRequestFilter {
     private static final int REQUESTS_PER_WINDOW = 100;
     private static final Duration WINDOW = Duration.ofSeconds(10);
 
+    private final ApiKeyService apiKeys;
     private final MerchantRepository merchants;
     private final Map<String, Window> windows = new ConcurrentHashMap<>();
 
-    public ApiKeyFilter(MerchantRepository merchants) {
+    public ApiKeyFilter(ApiKeyService apiKeys, MerchantRepository merchants) {
+        this.apiKeys = apiKeys;
         this.merchants = merchants;
     }
 
@@ -59,28 +66,37 @@ public class ApiKeyFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
-        String key = extractKey(request);
+        String presented = extractKey(request);
 
-        if (key == null) {
+        if (presented == null) {
             unauthorized(response, "no_api_key",
                     "Send your secret key as 'Authorization: Bearer sk_test_...'.");
             return;
         }
-        if (key.startsWith("pk_")) {
-            // A publishable key in a server-side call is almost always a copy-paste error, and
-            // saying so plainly saves an hour of debugging.
+
+        Optional<ApiKey> resolved = apiKeys.resolve(presented);
+        if (resolved.isEmpty()) {
+            // Deliberately the same response whether the key never existed or was revoked. Telling
+            // the caller which is a free oracle for anyone probing with harvested keys.
+            unauthorized(response, "invalid_api_key", "No active account matches that API key.");
+            return;
+        }
+
+        ApiKey key = resolved.get();
+        if (key.getType() == ApiKey.Type.PUBLISHABLE) {
+            // Almost always a copy-paste error, and saying so plainly saves an hour of debugging.
             unauthorized(response, "publishable_key_not_allowed",
                     "That is a publishable key. This endpoint needs a secret key (sk_...).");
             return;
         }
 
-        Optional<Merchant> merchant = merchants.findBySecretKey(key);
-        if (merchant.isEmpty()) {
-            unauthorized(response, "invalid_api_key", "No account matches that API key.");
+        Merchant merchant = merchants.findById(key.getMerchantId()).orElse(null);
+        if (merchant == null) {
+            unauthorized(response, "invalid_api_key", "No active account matches that API key.");
             return;
         }
 
-        if (!allowRequest(merchant.get().getId())) {
+        if (!allowRequest(merchant.getId())) {
             response.setStatus(429);
             response.setContentType("application/json");
             response.setHeader("Retry-After", String.valueOf(WINDOW.getSeconds()));
@@ -91,11 +107,12 @@ public class ApiKeyFilter extends OncePerRequestFilter {
         }
 
         try {
-            MerchantContext.set(merchant.get());
+            RequestContext.set(merchant, key);
+            apiKeys.touch(key);
             chain.doFilter(request, response);
         } finally {
             // Non-negotiable: the container will hand this thread to someone else.
-            MerchantContext.clear();
+            RequestContext.clear();
         }
     }
 

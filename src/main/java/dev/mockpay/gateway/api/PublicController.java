@@ -5,10 +5,11 @@ import dev.mockpay.gateway.domain.PaymentIntent;
 import dev.mockpay.gateway.domain.PaymentMethod;
 import dev.mockpay.gateway.domain.PendingAction;
 import dev.mockpay.gateway.rails.TestInstruments;
-import dev.mockpay.gateway.repo.MerchantRepository;
 import dev.mockpay.gateway.repo.PaymentIntentRepository;
 import dev.mockpay.gateway.repo.PendingActionRepository;
+import dev.mockpay.gateway.repo.MerchantRepository;
 import dev.mockpay.gateway.service.ApiException;
+import dev.mockpay.gateway.service.ApiKeyService;
 import dev.mockpay.gateway.service.PaymentService;
 import dev.mockpay.gateway.service.TokenizationService;
 import dev.mockpay.gateway.support.Crypto;
@@ -50,22 +51,30 @@ public class PublicController {
     private final PaymentIntentRepository intents;
     private final MerchantRepository merchants;
     private final PendingActionRepository pendingActions;
+    private final ApiKeyService apiKeys;
 
     public PublicController(TokenizationService tokenization, PaymentService payments,
                             PaymentIntentRepository intents, MerchantRepository merchants,
-                            PendingActionRepository pendingActions) {
+                            PendingActionRepository pendingActions, ApiKeyService apiKeys) {
         this.tokenization = tokenization;
         this.payments = payments;
         this.intents = intents;
         this.merchants = merchants;
         this.pendingActions = pendingActions;
+        this.apiKeys = apiKeys;
     }
 
     /** Tokenise a card straight from the browser. This is the call that keeps merchants out of scope. */
     @PostMapping("/payment_methods")
     public Map<String, Object> tokenize(@RequestParam("key") String publishableKey,
                                         @RequestBody Dtos.CreatePaymentMethodRequest body) {
-        Merchant merchant = merchants.findByPublishableKey(publishableKey)
+        // Resolved through the same hashed lookup as secret keys, then checked to be the
+        // publishable kind — so a leaked secret key cannot be used here either.
+        var key = apiKeys.resolve(publishableKey)
+                .filter(k -> k.getType() == dev.mockpay.gateway.domain.ApiKey.Type.PUBLISHABLE)
+                .orElseThrow(() -> new ApiException(401, "authentication_error", "invalid_api_key",
+                        "Unrecognised publishable key."));
+        Merchant merchant = merchants.findById(key.getMerchantId())
                 .orElseThrow(() -> new ApiException(401, "authentication_error", "invalid_api_key",
                         "Unrecognised publishable key."));
 

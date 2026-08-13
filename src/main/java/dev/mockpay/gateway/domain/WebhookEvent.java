@@ -60,6 +60,15 @@ public class WebhookEvent {
 
     private String destinationUrl;
 
+    /**
+     * Which endpoint this copy is for.
+     *
+     * <p>One business event now fans out into one row per subscribed endpoint, because each has its
+     * own URL, its own signing secret, and its own independent retry state — an endpoint that is
+     * down must not hold up delivery to one that is healthy.
+     */
+    private String endpointId;
+
     private Instant createdAt = Instant.now();
     private Instant deliveredAt;
 
@@ -67,12 +76,13 @@ public class WebhookEvent {
     }
 
     public WebhookEvent(String id, String merchantId, String type, String payloadJson,
-                        String destinationUrl) {
+                        String destinationUrl, String endpointId) {
         this.id = id;
         this.merchantId = merchantId;
         this.type = type;
         this.payloadJson = payloadJson;
         this.destinationUrl = destinationUrl;
+        this.endpointId = endpointId;
     }
 
     public String getId() {
@@ -129,6 +139,10 @@ public class WebhookEvent {
 
     public void setLastError(String lastError) {
         this.lastError = lastError;
+    }
+
+    public String getEndpointId() {
+        return endpointId;
     }
 
     public String getDestinationUrl() {

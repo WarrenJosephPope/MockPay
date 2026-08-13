@@ -56,7 +56,7 @@ public class PaymentIntentController {
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             HttpServletRequest request) {
 
-        String merchantId = MerchantContext.merchantId();
+        String merchantId = RequestContext.merchantId();
 
         IdempotencyService.Outcome outcome = idempotency.execute(
                 merchantId, idempotencyKey, "POST", "/v1/payment_intents", body, () -> {
@@ -87,14 +87,14 @@ public class PaymentIntentController {
 
     @GetMapping("/{id}")
     public Map<String, Object> retrieve(@PathVariable String id) {
-        return payments.snapshot(payments.mustFind(MerchantContext.merchantId(), id));
+        return payments.snapshot(payments.mustFind(RequestContext.merchantId(), id));
     }
 
     @GetMapping
     public Map<String, Object> list(@RequestParam(defaultValue = "0") int page,
                                     @RequestParam(defaultValue = "20") int limit,
                                     @RequestParam(required = false) String status) {
-        String merchantId = MerchantContext.merchantId();
+        String merchantId = RequestContext.merchantId();
         var pageable = PageRequest.of(page, Math.min(limit, 100));
 
         var results = status == null
@@ -119,7 +119,7 @@ public class PaymentIntentController {
                                        @RequestHeader(value = "Idempotency-Key", required = false)
                                        String idempotencyKey,
                                        HttpServletRequest request) {
-        String merchantId = MerchantContext.merchantId();
+        String merchantId = RequestContext.merchantId();
         String paymentMethodId = body == null ? null : body.payment_method();
 
         if (paymentMethodId == null) {
@@ -144,7 +144,7 @@ public class PaymentIntentController {
                                        @RequestBody(required = false) Dtos.CapturePaymentIntentRequest body,
                                        @RequestHeader(value = "Idempotency-Key", required = false)
                                        String idempotencyKey) {
-        String merchantId = MerchantContext.merchantId();
+        String merchantId = RequestContext.merchantId();
         Long amount = body == null ? null : body.amount_to_capture();
         return idempotency.execute(merchantId, idempotencyKey, "POST",
                 "/v1/payment_intents/" + id + "/capture", body,
@@ -155,7 +155,7 @@ public class PaymentIntentController {
     public Map<String, Object> cancel(@PathVariable String id,
                                       @RequestBody(required = false) Dtos.CancelPaymentIntentRequest body) {
         String reason = body == null ? "requested_by_customer" : body.cancellation_reason();
-        return payments.snapshot(payments.cancel(MerchantContext.merchantId(), id, reason));
+        return payments.snapshot(payments.cancel(RequestContext.merchantId(), id, reason));
     }
 
     /**
@@ -167,7 +167,7 @@ public class PaymentIntentController {
      */
     @GetMapping("/{id}/transactions")
     public Map<String, Object> transactions(@PathVariable String id) {
-        List<Transaction> txns = payments.transactionsFor(MerchantContext.merchantId(), id);
+        List<Transaction> txns = payments.transactionsFor(RequestContext.merchantId(), id);
         List<Map<String, Object>> data = txns.stream().map(t -> {
             Map<String, Object> map = new LinkedHashMap<>();
             map.put("id", t.getId());
@@ -199,7 +199,7 @@ public class PaymentIntentController {
     /** The double-entry journals this payment produced. */
     @GetMapping("/{id}/ledger")
     public Map<String, Object> ledgerEntries(@PathVariable String id) {
-        payments.mustFind(MerchantContext.merchantId(), id);
+        payments.mustFind(RequestContext.merchantId(), id);
         List<Map<String, Object>> data = ledger.forReference(id).stream().map(e -> {
             Map<String, Object> map = new LinkedHashMap<>();
             map.put("id", e.getId());
@@ -221,7 +221,7 @@ public class PaymentIntentController {
     @GetMapping("/{id}/refunds")
     public Map<String, Object> refundsFor(@PathVariable String id) {
         List<Map<String, Object>> data = refunds
-                .forPaymentIntent(MerchantContext.merchantId(), id).stream()
+                .forPaymentIntent(RequestContext.merchantId(), id).stream()
                 .map(refunds::snapshot)
                 .toList();
         Map<String, Object> response = new LinkedHashMap<>();

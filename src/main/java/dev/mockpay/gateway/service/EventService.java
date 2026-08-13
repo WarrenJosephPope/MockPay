@@ -1,10 +1,10 @@
 package dev.mockpay.gateway.service;
 
 import tools.jackson.databind.ObjectMapper;
-import dev.mockpay.gateway.domain.Merchant;
+import dev.mockpay.gateway.domain.WebhookEndpoint;
 import dev.mockpay.gateway.domain.WebhookEvent;
 import dev.mockpay.gateway.rails.GatewayProperties;
-import dev.mockpay.gateway.repo.MerchantRepository;
+import dev.mockpay.gateway.repo.WebhookEndpointRepository;
 import dev.mockpay.gateway.repo.WebhookEventRepository;
 import dev.mockpay.gateway.support.Crypto;
 import dev.mockpay.gateway.support.Ids;
@@ -21,6 +21,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,15 +45,15 @@ public class EventService {
     private static final Logger log = LoggerFactory.getLogger(EventService.class);
 
     private final WebhookEventRepository events;
-    private final MerchantRepository merchants;
+    private final WebhookEndpointRepository endpoints;
     private final GatewayProperties props;
     private final ObjectMapper mapper;
     private final HttpClient http;
 
-    public EventService(WebhookEventRepository events, MerchantRepository merchants,
+    public EventService(WebhookEventRepository events, WebhookEndpointRepository endpoints,
                         GatewayProperties props, ObjectMapper mapper) {
         this.events = events;
-        this.merchants = merchants;
+        this.endpoints = endpoints;
         this.props = props;
         this.mapper = mapper;
         this.http = HttpClient.newBuilder()
@@ -71,26 +72,42 @@ public class EventService {
      * state changes that later rolled back.
      */
     @Transactional(propagation = Propagation.MANDATORY)
-    public WebhookEvent emit(String merchantId, String type, Map<String, Object> data) {
-        Merchant merchant = merchants.findById(merchantId).orElseThrow();
+    public List<WebhookEvent> emit(String merchantId, String type, Map<String, Object> data) {
+        List<WebhookEndpoint> subscribed = endpoints.findByMerchantIdAndEnabledTrue(merchantId)
+                .stream()
+                .filter(e -> e.subscribesTo(type))
+                .toList();
 
-        Map<String, Object> envelope = new LinkedHashMap<>();
-        String eventId = Ids.generate("evt");
-        envelope.put("id", eventId);
-        envelope.put("object", "event");
-        envelope.put("type", type);
-        envelope.put("created", Instant.now().getEpochSecond());
-        envelope.put("livemode", false);
-        envelope.put("data", Map.of("object", data));
-
-        try {
-            String payload = mapper.writeValueAsString(envelope);
-            WebhookEvent event = new WebhookEvent(eventId, merchantId, type, payload,
-                    merchant.getWebhookUrl());
-            return events.save(event);
-        } catch (Exception e) {
-            throw new IllegalStateException("Could not serialise event payload", e);
+        if (subscribed.isEmpty()) {
+            // Not an error. A merchant with no endpoints configured still gets a queryable event
+            // log via GET /v1/events; they simply are not being pushed to.
+            log.debug("No enabled endpoint subscribes to {} for {}", type, merchantId);
+            return List.of();
         }
+
+        List<WebhookEvent> created = new ArrayList<>(subscribed.size());
+        for (WebhookEndpoint endpoint : subscribed) {
+            // A distinct event id per endpoint. Consumers deduplicate on it, so two endpoints
+            // sharing one id would make a legitimate second delivery look like a replay.
+            String eventId = Ids.generate("evt");
+
+            Map<String, Object> envelope = new LinkedHashMap<>();
+            envelope.put("id", eventId);
+            envelope.put("object", "event");
+            envelope.put("type", type);
+            envelope.put("created", Instant.now().getEpochSecond());
+            envelope.put("livemode", false);
+            envelope.put("data", Map.of("object", data));
+
+            try {
+                String payload = mapper.writeValueAsString(envelope);
+                created.add(events.save(new WebhookEvent(eventId, merchantId, type, payload,
+                        endpoint.getUrl(), endpoint.getId())));
+            } catch (Exception e) {
+                throw new IllegalStateException("Could not serialise event payload", e);
+            }
+        }
+        return created;
     }
 
     /**
@@ -132,13 +149,25 @@ public class EventService {
             return;
         }
 
-        Merchant merchant = merchants.findById(managed.getMerchantId()).orElseThrow();
+        WebhookEndpoint endpoint = managed.getEndpointId() == null ? null
+                : endpoints.findById(managed.getEndpointId()).orElse(null);
+        if (endpoint == null) {
+            managed.setStatus(WebhookEvent.Status.DEAD);
+            managed.setLastError("Endpoint no longer exists");
+            events.save(managed);
+            return;
+        }
+
         long timestamp = Instant.now().getEpochSecond();
 
+        // Signed with THIS endpoint's secret, not an account-wide one. Rotating one endpoint's
+        // secret must not break the others, and a compromised staging endpoint must not be able to
+        // forge events to production.
+        //
         // Sign timestamp AND body together. Signing only the body would let anyone who ever
         // captured one valid request replay it forever.
         String signedPayload = timestamp + "." + managed.getPayloadJson();
-        String signature = Crypto.hmacSha256Hex(merchant.getWebhookSecret(), signedPayload);
+        String signature = Crypto.hmacSha256Hex(endpoint.getSecret(), signedPayload);
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(managed.getDestinationUrl()))
@@ -211,8 +240,12 @@ public class EventService {
         event.setAttempts(0);
         event.setNextAttemptAt(Instant.now());
         event.setLastError(null);
-        // Pick up the current URL, since the reason for replaying is usually that it changed.
-        merchants.findById(merchantId).ifPresent(m -> event.setDestinationUrl(m.getWebhookUrl()));
+        // Pick up the endpoint's current URL, since the reason for replaying is usually that it
+        // was wrong or unreachable at the time.
+        if (event.getEndpointId() != null) {
+            endpoints.findById(event.getEndpointId())
+                    .ifPresent(e -> event.setDestinationUrl(e.getUrl()));
+        }
         return events.save(event);
     }
 

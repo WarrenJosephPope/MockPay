@@ -5,7 +5,10 @@ import dev.mockpay.gateway.domain.Merchant;
 import dev.mockpay.gateway.domain.PaymentMethod;
 import dev.mockpay.gateway.domain.WebhookEvent;
 import dev.mockpay.gateway.repo.MerchantRepository;
+import dev.mockpay.gateway.domain.ApiKey;
+import dev.mockpay.gateway.service.AccountService;
 import dev.mockpay.gateway.service.ApiException;
+import dev.mockpay.gateway.service.ApiKeyService;
 import dev.mockpay.gateway.service.DisputeService;
 import dev.mockpay.gateway.service.EventService;
 import dev.mockpay.gateway.service.IdempotencyService;
@@ -15,7 +18,9 @@ import dev.mockpay.gateway.service.SettlementService;
 import dev.mockpay.gateway.service.TokenizationService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -41,12 +46,15 @@ public class ResourceController {
     private final LedgerService ledger;
     private final IdempotencyService idempotency;
     private final MerchantRepository merchants;
+    private final ApiKeyService apiKeys;
+    private final AccountService accounts;
     private final ObjectMapper mapper;
 
     public ResourceController(TokenizationService tokenization, RefundService refunds,
                               DisputeService disputes, SettlementService settlements,
                               EventService events, LedgerService ledger,
                               IdempotencyService idempotency, MerchantRepository merchants,
+                              ApiKeyService apiKeys, AccountService accounts,
                               ObjectMapper mapper) {
         this.tokenization = tokenization;
         this.refunds = refunds;
@@ -56,6 +64,8 @@ public class ResourceController {
         this.ledger = ledger;
         this.idempotency = idempotency;
         this.merchants = merchants;
+        this.apiKeys = apiKeys;
+        this.accounts = accounts;
         this.mapper = mapper;
     }
 
@@ -64,7 +74,7 @@ public class ResourceController {
     @PostMapping("/payment_methods")
     public ResponseEntity<Map<String, Object>> createPaymentMethod(
             @Valid @RequestBody Dtos.CreatePaymentMethodRequest body) {
-        String merchantId = MerchantContext.merchantId();
+        String merchantId = RequestContext.merchantId();
 
         PaymentMethod pm = switch (body.type().toLowerCase()) {
             case "card" -> {
@@ -93,7 +103,7 @@ public class ResourceController {
     public ResponseEntity<Map<String, Object>> createRefund(
             @Valid @RequestBody Dtos.CreateRefundRequest body,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
-        String merchantId = MerchantContext.merchantId();
+        String merchantId = RequestContext.merchantId();
         var outcome = idempotency.execute(merchantId, idempotencyKey, "POST", "/v1/refunds", body,
                 () -> refunds.snapshot(refunds.create(merchantId, body.payment_intent(),
                         body.amount(), body.reason())));
@@ -104,7 +114,7 @@ public class ResourceController {
 
     @GetMapping("/refunds/{id}")
     public Map<String, Object> retrieveRefund(@PathVariable String id) {
-        return refunds.snapshot(refunds.mustFind(MerchantContext.merchantId(), id));
+        return refunds.snapshot(refunds.mustFind(RequestContext.merchantId(), id));
     }
 
     // ---------------------------------------------------------------- disputes
@@ -119,20 +129,20 @@ public class ResourceController {
     public ResponseEntity<Map<String, Object>> createDispute(
             @Valid @RequestBody Dtos.CreateDisputeRequest body) {
         return ResponseEntity.status(201).body(disputes.snapshot(
-                disputes.open(MerchantContext.merchantId(), body.payment_intent(),
+                disputes.open(RequestContext.merchantId(), body.payment_intent(),
                         body.reason_code(), body.amount())));
     }
 
     @GetMapping("/disputes")
     public Map<String, Object> listDisputes() {
-        List<Map<String, Object>> data = disputes.list(MerchantContext.merchantId()).stream()
+        List<Map<String, Object>> data = disputes.list(RequestContext.merchantId()).stream()
                 .map(disputes::snapshot).toList();
         return listResponse(data);
     }
 
     @GetMapping("/disputes/{id}")
     public Map<String, Object> retrieveDispute(@PathVariable String id) {
-        return disputes.snapshot(disputes.mustFind(MerchantContext.merchantId(), id));
+        return disputes.snapshot(disputes.mustFind(RequestContext.merchantId(), id));
     }
 
     @PostMapping("/disputes/{id}/evidence")
@@ -145,19 +155,19 @@ public class ResourceController {
             throw new ApiException(400, "invalid_request_error", "invalid_evidence",
                     "Evidence must be a flat object of string values.");
         }
-        return disputes.snapshot(disputes.submitEvidence(MerchantContext.merchantId(), id, json));
+        return disputes.snapshot(disputes.submitEvidence(RequestContext.merchantId(), id, json));
     }
 
     @PostMapping("/disputes/{id}/resolve")
     public Map<String, Object> resolveDispute(@PathVariable String id,
                                               @Valid @RequestBody Dtos.ResolveDisputeRequest body) {
         return disputes.snapshot(
-                disputes.resolve(MerchantContext.merchantId(), id, body.merchant_wins()));
+                disputes.resolve(RequestContext.merchantId(), id, body.merchant_wins()));
     }
 
     @PostMapping("/disputes/{id}/accept")
     public Map<String, Object> acceptDispute(@PathVariable String id) {
-        return disputes.snapshot(disputes.accept(MerchantContext.merchantId(), id));
+        return disputes.snapshot(disputes.accept(RequestContext.merchantId(), id));
     }
 
     @GetMapping("/dispute_reason_codes")
@@ -179,7 +189,7 @@ public class ResourceController {
     @PostMapping("/settlements/run")
     public ResponseEntity<Map<String, Object>> runSettlement(
             @RequestBody(required = false) Dtos.RunSettlementRequest body) {
-        String merchantId = MerchantContext.merchantId();
+        String merchantId = RequestContext.merchantId();
         String currency = body == null || body.currency() == null
                 ? merchants.findById(merchantId).orElseThrow().getSettlementCurrency()
                 : body.currency();
@@ -194,12 +204,12 @@ public class ResourceController {
 
     @PostMapping("/settlements/{id}/payout")
     public Map<String, Object> payout(@PathVariable String id) {
-        return settlements.snapshot(settlements.payout(MerchantContext.merchantId(), id));
+        return settlements.snapshot(settlements.payout(RequestContext.merchantId(), id));
     }
 
     @GetMapping("/settlements")
     public Map<String, Object> listSettlements() {
-        List<Map<String, Object>> data = settlements.list(MerchantContext.merchantId()).stream()
+        List<Map<String, Object>> data = settlements.list(RequestContext.merchantId()).stream()
                 .map(settlements::snapshot).toList();
         return listResponse(data);
     }
@@ -208,46 +218,21 @@ public class ResourceController {
 
     @GetMapping("/events")
     public Map<String, Object> listEvents() {
-        List<Map<String, Object>> data = events.listForMerchant(MerchantContext.merchantId())
+        List<Map<String, Object>> data = events.listForMerchant(RequestContext.merchantId())
                 .stream().map(this::snapshot).toList();
         return listResponse(data);
     }
 
     @PostMapping("/events/{id}/replay")
     public Map<String, Object> replayEvent(@PathVariable String id) {
-        return snapshot(events.replay(id, MerchantContext.merchantId()));
+        return snapshot(events.replay(id, RequestContext.merchantId()));
     }
 
     // ----------------------------------------------------------------- account
 
     @GetMapping("/account")
     public Map<String, Object> account() {
-        return accountSnapshot(MerchantContext.get());
-    }
-
-    @PostMapping("/account/webhook")
-    public Map<String, Object> setWebhook(@Valid @RequestBody Dtos.UpdateWebhookRequest body) {
-        var merchant = merchants.findById(MerchantContext.merchantId()).orElseThrow();
-        merchant.setWebhookUrl(body.url());
-        Merchant saved = merchants.save(merchant);
-        // Render the saved instance, not MerchantContext. The context holds the Merchant loaded by
-        // the auth filter at the start of the request, so it still carries the old URL — echoing it
-        // back would tell the caller their update did nothing.
-        return accountSnapshot(saved);
-    }
-
-    private Map<String, Object> accountSnapshot(Merchant merchant) {
-        Map<String, Object> map = new LinkedHashMap<>();
-        map.put("id", merchant.getId());
-        map.put("object", "account");
-        map.put("name", merchant.getName());
-        map.put("publishable_key", merchant.getPublishableKey());
-        map.put("settlement_currency", merchant.getSettlementCurrency());
-        map.put("mcc", merchant.getMcc());
-        map.put("country", merchant.getCountry());
-        map.put("webhook_url", merchant.getWebhookUrl());
-        map.put("webhook_secret", merchant.getWebhookSecret());
-        return map;
+        return accountSnapshot(RequestContext.merchant());
     }
 
     /**
@@ -260,11 +245,133 @@ public class ResourceController {
     public Map<String, Object> balance() {
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("object", "trial_balance");
-        map.put("accounts", ledger.trialBalance(MerchantContext.merchantId()));
+        map.put("accounts", ledger.trialBalance(RequestContext.merchantId()));
         return map;
     }
 
+    // ---------------------------------------------------------------- api keys
+
+    @GetMapping("/api_keys")
+    public Map<String, Object> listKeys() {
+        List<Map<String, Object>> data = apiKeys.list(RequestContext.merchantId()).stream()
+                // Never any plaintext: secret keys are unrecoverable after creation, by design.
+                .map(k -> apiKeys.snapshot(k, null))
+                .toList();
+        return listResponse(data);
+    }
+
+    /**
+     * Issue a key.
+     *
+     * <p>The response is the only time a secret key is readable. Rotation without downtime is what
+     * this enables: create the replacement, deploy it, watch {@code last_used_at} on the old one
+     * stop moving, then revoke it. A single key column made that impossible.
+     */
+    @PostMapping("/api_keys")
+    public ResponseEntity<Map<String, Object>> createKey(
+            @Valid @RequestBody Dtos.CreateApiKeyRequest body,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        String merchantId = RequestContext.merchantId();
+        ApiKey.Type type = "publishable".equalsIgnoreCase(body.type())
+                ? ApiKey.Type.PUBLISHABLE : ApiKey.Type.SECRET;
+
+        var outcome = idempotency.execute(merchantId, idempotencyKey, "POST", "/v1/api_keys", body,
+                () -> {
+                    var issued = apiKeys.issue(merchantId, type, body.name());
+                    return apiKeys.snapshot(issued.record(), issued.plaintext());
+                });
+        return ResponseEntity.status(outcome.replayed() ? 200 : 201)
+                .header("Idempotent-Replayed", String.valueOf(outcome.replayed()))
+                .body(outcome.body());
+    }
+
+    @PostMapping("/api_keys/{id}/revoke")
+    public Map<String, Object> revokeKey(@PathVariable String id) {
+        return apiKeys.snapshot(apiKeys.revoke(RequestContext.merchantId(), id), null);
+    }
+
+    // ------------------------------------------------------- webhook endpoints
+
+    @GetMapping("/webhook_endpoints")
+    public Map<String, Object> listEndpoints() {
+        List<Map<String, Object>> data = accounts.listEndpoints(RequestContext.merchantId())
+                .stream().map(accounts::snapshot).toList();
+        return listResponse(data);
+    }
+
+    @PostMapping("/webhook_endpoints")
+    public ResponseEntity<Map<String, Object>> createEndpoint(
+            @Valid @RequestBody Dtos.CreateWebhookEndpointRequest body,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        String merchantId = RequestContext.merchantId();
+        var outcome = idempotency.execute(merchantId, idempotencyKey, "POST",
+                "/v1/webhook_endpoints", body,
+                () -> accounts.snapshot(accounts.addEndpoint(merchantId, body.url(),
+                        body.description(), joinEvents(body.enabled_events()))));
+        return ResponseEntity.status(outcome.replayed() ? 200 : 201)
+                .header("Idempotent-Replayed", String.valueOf(outcome.replayed()))
+                .body(outcome.body());
+    }
+
+    @GetMapping("/webhook_endpoints/{id}")
+    public Map<String, Object> retrieveEndpoint(@PathVariable String id) {
+        return accounts.snapshot(accounts.mustFindEndpoint(RequestContext.merchantId(), id));
+    }
+
+    @PatchMapping("/webhook_endpoints/{id}")
+    public Map<String, Object> updateEndpoint(@PathVariable String id,
+                                              @RequestBody Dtos.UpdateWebhookEndpointRequest body) {
+        return accounts.snapshot(accounts.updateEndpoint(RequestContext.merchantId(), id,
+                body.url(), body.description(), joinEvents(body.enabled_events()), body.enabled()));
+    }
+
+    @DeleteMapping("/webhook_endpoints/{id}")
+    public Map<String, Object> deleteEndpoint(@PathVariable String id) {
+        accounts.deleteEndpoint(RequestContext.merchantId(), id);
+        return Map.of("id", id, "object", "webhook_endpoint", "deleted", true);
+    }
+
+    /**
+     * Backwards-compatible shortcut: replace the account's endpoints with a single URL.
+     *
+     * <p>Kept because the README, the docs and existing integrations all use it. It is a
+     * convenience over the endpoint collection, not a separate concept.
+     */
+    @PostMapping("/account/webhook")
+    public Map<String, Object> setWebhook(@Valid @RequestBody Dtos.UpdateWebhookRequest body) {
+        String merchantId = RequestContext.merchantId();
+        accounts.listEndpoints(merchantId)
+                .forEach(e -> accounts.deleteEndpoint(merchantId, e.getId()));
+        accounts.addEndpoint(merchantId, body.url(), "Set via /v1/account/webhook", null);
+        return accountSnapshot(RequestContext.merchant());
+    }
+
     // ---------------------------------------------------------------- helpers
+
+    private Map<String, Object> accountSnapshot(Merchant merchant) {
+        var endpointList = accounts.listEndpoints(merchant.getId());
+
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("id", merchant.getId());
+        map.put("object", "account");
+        map.put("name", merchant.getName());
+        // Returned in full: a publishable key is public by design.
+        map.put("publishable_key", apiKeys.publishableKeyFor(merchant.getId()).orElse(null));
+        map.put("settlement_currency", merchant.getSettlementCurrency());
+        map.put("mcc", merchant.getMcc());
+        map.put("country", merchant.getCountry());
+        // Mirrors of the first endpoint, retained so the single-webhook API and the existing docs
+        // keep working. The endpoint collection below is the real model.
+        map.put("webhook_url", endpointList.isEmpty() ? null : endpointList.get(0).getUrl());
+        map.put("webhook_secret", endpointList.isEmpty() ? null : endpointList.get(0).getSecret());
+        map.put("webhook_endpoints", endpointList.stream().map(accounts::snapshot).toList());
+        return map;
+    }
+
+    /** Null means "all events". An explicit empty list would mean "none", which is never intended. */
+    private String joinEvents(List<String> events) {
+        return events == null || events.isEmpty() ? null : String.join(",", events);
+    }
 
     private Map<String, Object> snapshot(PaymentMethod pm) {
         Map<String, Object> map = new LinkedHashMap<>();

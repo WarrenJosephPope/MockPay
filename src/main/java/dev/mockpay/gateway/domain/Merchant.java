@@ -1,6 +1,5 @@
 package dev.mockpay.gateway.domain;
 
-import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
@@ -23,18 +22,10 @@ public class Merchant {
 
     private String name;
 
-    /** Safe to embed in a browser. Identifies the account, cannot move money. */
-    @Column(unique = true)
-    private String publishableKey;
-
-    /** Server-side only. Full authority over the account. */
-    @Column(unique = true)
-    private String secretKey;
-
-    /** Separate secret, used only to sign outbound webhooks. */
-    private String webhookSecret;
-
-    private String webhookUrl;
+    // API keys live in `api_keys` and webhook destinations in `webhook_endpoints`. They were
+    // columns here until Phase 2; moving them out is what allows several keys per account, key
+    // rotation without downtime, several webhook endpoints, and — most importantly — storing
+    // secret keys as hashes rather than as readable strings.
 
     private String settlementCurrency;
 
@@ -48,15 +39,9 @@ public class Merchant {
     protected Merchant() {
     }
 
-    public Merchant(String id, String name, String publishableKey, String secretKey,
-                    String webhookSecret, String webhookUrl, String settlementCurrency,
-                    String mcc, String country) {
+    public Merchant(String id, String name, String settlementCurrency, String mcc, String country) {
         this.id = id;
         this.name = name;
-        this.publishableKey = publishableKey;
-        this.secretKey = secretKey;
-        this.webhookSecret = webhookSecret;
-        this.webhookUrl = webhookUrl;
         this.settlementCurrency = settlementCurrency;
         this.mcc = mcc;
         this.country = country;
@@ -68,26 +53,6 @@ public class Merchant {
 
     public String getName() {
         return name;
-    }
-
-    public String getPublishableKey() {
-        return publishableKey;
-    }
-
-    public String getSecretKey() {
-        return secretKey;
-    }
-
-    public String getWebhookSecret() {
-        return webhookSecret;
-    }
-
-    public String getWebhookUrl() {
-        return webhookUrl;
-    }
-
-    public void setWebhookUrl(String webhookUrl) {
-        this.webhookUrl = webhookUrl;
     }
 
     public String getSettlementCurrency() {

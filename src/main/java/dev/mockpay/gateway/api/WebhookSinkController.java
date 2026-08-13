@@ -1,6 +1,6 @@
 package dev.mockpay.gateway.api;
 
-import dev.mockpay.gateway.repo.MerchantRepository;
+import dev.mockpay.gateway.repo.WebhookEndpointRepository;
 import dev.mockpay.gateway.support.Crypto;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,13 +49,13 @@ public class WebhookSinkController {
     private static final long TOLERANCE_SECONDS = 300;
     private static final int MAX_RETAINED = 200;
 
-    private final MerchantRepository merchants;
+    private final WebhookEndpointRepository endpoints;
     private final List<Map<String, Object>> received =
             Collections.synchronizedList(new LinkedList<>());
     private final Set<String> processedEventIds = ConcurrentHashMap.newKeySet();
 
-    public WebhookSinkController(MerchantRepository merchants) {
-        this.merchants = merchants;
+    public WebhookSinkController(WebhookEndpointRepository endpoints) {
+        this.endpoints = endpoints;
     }
 
     @PostMapping
@@ -96,9 +96,11 @@ public class WebhookSinkController {
             return ResponseEntity.status(400).body(Map.of("error", "timestamp outside tolerance"));
         }
 
-        // Try every configured secret, because this one sink stands in for several merchants.
-        boolean verified = merchants.findAll().stream().anyMatch(m -> Crypto.constantTimeEquals(
-                Crypto.hmacSha256Hex(m.getWebhookSecret(), timestampAndBody(signatureHeader, rawBody)),
+        // Try every configured endpoint secret, because this one sink stands in for several
+        // merchants and each endpoint now signs with its own key. A real merchant knows exactly
+        // which endpoint received the request and checks against that one secret only.
+        boolean verified = endpoints.findAll().stream().anyMatch(e -> Crypto.constantTimeEquals(
+                Crypto.hmacSha256Hex(e.getSecret(), timestampAndBody(signatureHeader, rawBody)),
                 extractSignature(signatureHeader)));
 
         if (!verified) {

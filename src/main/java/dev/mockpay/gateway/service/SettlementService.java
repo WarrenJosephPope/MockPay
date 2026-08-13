@@ -17,7 +17,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -74,8 +73,12 @@ public class SettlementService {
     @Transactional
     public Settlement runBatch(String merchantId, String currency, LocalDate periodStart,
                                LocalDate periodEnd) {
-        Instant from = periodStart.atStartOfDay(ZoneOffset.UTC).toInstant();
-        Instant to = periodEnd.plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant();
+        // The zone is configuration, not a constant, and the SAME zone must decide both the
+        // default period and this window. Mixing the server's local zone with UTC produces a
+        // window in the future for anyone east of Greenwich.
+        var zone = props.getSettlement().zoneId();
+        Instant from = periodStart.atStartOfDay(zone).toInstant();
+        Instant to = periodEnd.plusDays(1).atStartOfDay(zone).toInstant();
 
         List<PaymentIntent> captured = intents.findByMerchantIdAndStatusAndCapturedAtBetween(
                 merchantId, PaymentIntent.Status.SUCCEEDED, from, to);

@@ -22,10 +22,52 @@ spring:
   jackson:
     default-property-inclusion: non_null
 
+  mail:
+    # Leave MOCKPAY_SMTP_HOST unset and nothing is sent — EmailService writes the whole message,
+    # link included, to the log instead. Local development and the test suite then need no mail
+    # server, and the flow stays observable.
+    host: ${MOCKPAY_SMTP_HOST:}
+    port: ${MOCKPAY_SMTP_PORT:1025}
+    username: ${MOCKPAY_SMTP_USERNAME:}
+    password: ${MOCKPAY_SMTP_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: ${MOCKPAY_SMTP_AUTH:false}
+          starttls:
+            enable: ${MOCKPAY_SMTP_STARTTLS:false}
+          # Never let a hung SMTP server hold a thread indefinitely.
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
+
+  session:
+    # Sessions in the database, not in server memory: they survive a restart, they work unchanged
+    # with more than one instance, and an operator can revoke one by deleting a row.
+    store-type: jdbc
+    timeout: ${MOCKPAY_SESSION_TIMEOUT:8h}
+    jdbc:
+      # `embedded` creates the tables automatically on H2 and leaves PostgreSQL alone, where Flyway
+      # owns them (V3). Anything else would fight the migration.
+      initialize-schema: embedded
+
 server:
   # SERVER_PORT is Spring's own convention; GATEWAY_PORT is what the compose
   # files and .env use, so both work.
   port: ${GATEWAY_PORT:${SERVER_PORT:8088}}
+  servlet:
+    session:
+      cookie:
+        # No JavaScript access. An XSS bug then cannot read the session cookie,
+        # which is the main practical advantage over a token in localStorage.
+        http-only: true
+        # Lax, not Strict: Strict would drop the cookie when a user follows a link
+        # into the dashboard from anywhere else, including their own email.
+        same-site: lax
+        # Must be false over plain HTTP, or the browser silently discards it on
+        # localhost. Set true behind TLS.
+        secure: ${MOCKPAY_COOKIE_SECURE:false}
+        name: mockpay_session
 
 logging:
   level:
@@ -66,6 +108,15 @@ mockpay:
     wallet-bps: ${MOCKPAY_PRICING_WALLET_BPS:180}
     wallet-fixed-minor: ${MOCKPAY_PRICING_WALLET_FIXED_MINOR:0}
 
+  mail:
+    # The From address on outbound mail. Providers reject or spam-bin addresses that do not match
+    # an authenticated domain, so this has to be set alongside real SMTP credentials.
+    from: ${MOCKPAY_MAIL_FROM:MockPay <no-reply@mockpay.local>}
+
   settlement:
     # T+N business days from capture to payout.
     delay-days: ${MOCKPAY_SETTLEMENT_DELAY_DAYS:2}
+    # The zone the settlement day is measured in. Captures are instants; a settlement period is
+    # a range of dates, so one zone has to decide which day a payment fell on. Real acquirers
+    # publish a cut-off in a named zone for the same reason.
+    zone: ${MOCKPAY_SETTLEMENT_ZONE:UTC}

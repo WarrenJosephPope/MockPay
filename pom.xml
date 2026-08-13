@@ -31,6 +31,47 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-validation</artifactId>
 		</dependency>
+
+		<!-- Dashboard authentication: session cookies, CSRF, filter chains. The
+		     existing API-key filter becomes one chain among several rather than
+		     being replaced. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+
+		<!-- Sessions in PostgreSQL rather than in server memory. Survives a restart,
+		     and lets an operator revoke a session by deleting a row.
+
+		     Must be the *starter*. Boot 4 moved session auto-configuration into its
+		     own module, so `org.springframework.session:spring-session-jdbc` alone
+		     puts the repository on the classpath with nothing wiring it up:
+		     `spring.session.store-type: jdbc` is then silently ignored, sessions
+		     stay in Tomcat's memory, and SPRING_SESSION is never written to. Exactly
+		     the same trap as flyway-core — in Boot 4, prefer the starter. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-session-jdbc</artifactId>
+		</dependency>
+
+		<!-- Outbound email: invitations and password resets. SMTP settings come from
+		     the environment; with none configured the service logs the message
+		     instead of sending, so local development needs no mail server. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-mail</artifactId>
+		</dependency>
+
+		<!-- Argon2 for PASSWORDS. Deliberately slow, because humans choose
+		     guessable ones and the cost is what makes a stolen hash expensive to
+		     crack. The opposite reasoning to API keys, which are high-entropy and
+		     hashed with plain SHA-256 — see ApiKey. Spring Security's Argon2
+		     encoder needs BouncyCastle on the classpath. -->
+		<dependency>
+			<groupId>org.bouncycastle</groupId>
+			<artifactId>bcprov-jdk18on</artifactId>
+			<version>1.78.1</version>
+		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-h2console</artifactId>

@@ -6,6 +6,7 @@ import dev.mockpay.gateway.domain.PaymentMethod;
 import dev.mockpay.gateway.domain.WebhookEvent;
 import dev.mockpay.gateway.repo.MerchantRepository;
 import dev.mockpay.gateway.domain.ApiKey;
+import dev.mockpay.gateway.rails.GatewayProperties;
 import dev.mockpay.gateway.service.AccountService;
 import dev.mockpay.gateway.service.ApiException;
 import dev.mockpay.gateway.service.ApiKeyService;
@@ -48,6 +49,7 @@ public class ResourceController {
     private final MerchantRepository merchants;
     private final ApiKeyService apiKeys;
     private final AccountService accounts;
+    private final GatewayProperties props;
     private final ObjectMapper mapper;
 
     public ResourceController(TokenizationService tokenization, RefundService refunds,
@@ -55,7 +57,7 @@ public class ResourceController {
                               EventService events, LedgerService ledger,
                               IdempotencyService idempotency, MerchantRepository merchants,
                               ApiKeyService apiKeys, AccountService accounts,
-                              ObjectMapper mapper) {
+                              GatewayProperties props, ObjectMapper mapper) {
         this.tokenization = tokenization;
         this.refunds = refunds;
         this.disputes = disputes;
@@ -66,6 +68,7 @@ public class ResourceController {
         this.merchants = merchants;
         this.apiKeys = apiKeys;
         this.accounts = accounts;
+        this.props = props;
         this.mapper = mapper;
     }
 
@@ -193,10 +196,12 @@ public class ResourceController {
         String currency = body == null || body.currency() == null
                 ? merchants.findById(merchantId).orElseThrow().getSettlementCurrency()
                 : body.currency();
+        // Same zone the service uses for the window; see GatewayProperties.SettlementCfg.zone.
+        var zone = props.getSettlement().zoneId();
         LocalDate start = body == null || body.period_start() == null
-                ? LocalDate.now().minusDays(1) : LocalDate.parse(body.period_start());
+                ? LocalDate.now(zone).minusDays(1) : LocalDate.parse(body.period_start());
         LocalDate end = body == null || body.period_end() == null
-                ? LocalDate.now() : LocalDate.parse(body.period_end());
+                ? LocalDate.now(zone) : LocalDate.parse(body.period_end());
 
         return ResponseEntity.status(201).body(settlements.snapshot(
                 settlements.runBatch(merchantId, currency, start, end)));

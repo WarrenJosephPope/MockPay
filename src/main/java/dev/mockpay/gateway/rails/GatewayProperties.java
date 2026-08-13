@@ -14,6 +14,21 @@ public class GatewayProperties {
     private Idempotency idempotency = new Idempotency();
     private Pricing pricing = new Pricing();
     private SettlementCfg settlement = new SettlementCfg();
+    private Mail mail = new Mail();
+
+    /** Outbound email. SMTP host, port and credentials are Spring's own `spring.mail.*`. */
+    public static class Mail {
+        /** The From address on every message the gateway sends. */
+        private String from = "MockPay <no-reply@mockpay.local>";
+
+        public String getFrom() {
+            return from;
+        }
+
+        public void setFrom(String from) {
+            this.from = from;
+        }
+    }
 
     public static class Rail {
         private long minLatencyMs = 120;
@@ -148,12 +163,38 @@ public class GatewayProperties {
     public static class SettlementCfg {
         private int delayDays = 2;
 
+        /**
+         * The timezone the settlement day is measured in.
+         *
+         * <p>Not cosmetic. A settlement period is a range of calendar dates, but captures are
+         * instants — so "which day did this payment fall on" has no answer until a zone is named.
+         * Real acquirers publish a cut-off time in a specific zone for exactly this reason, and
+         * every capture after it belongs to the next cycle.
+         *
+         * <p>It must be applied consistently: computing the default period in the server's local
+         * zone and the window in UTC means that, for anyone east of Greenwich, the period after
+         * midnight local time is entirely in the future and settles nothing.
+         */
+        private String zone = "UTC";
+
         public int getDelayDays() {
             return delayDays;
         }
 
         public void setDelayDays(int delayDays) {
             this.delayDays = delayDays;
+        }
+
+        public String getZone() {
+            return zone;
+        }
+
+        public void setZone(String zone) {
+            this.zone = zone;
+        }
+
+        public java.time.ZoneId zoneId() {
+            return java.time.ZoneId.of(zone);
         }
     }
 
@@ -203,5 +244,13 @@ public class GatewayProperties {
 
     public void setSettlement(SettlementCfg settlement) {
         this.settlement = settlement;
+    }
+
+    public Mail getMail() {
+        return mail;
+    }
+
+    public void setMail(Mail mail) {
+        this.mail = mail;
     }
 }

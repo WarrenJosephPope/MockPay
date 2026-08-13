@@ -111,6 +111,43 @@ public class EventService {
     }
 
     /**
+     * Send a synthetic event to one endpoint, to prove it is reachable.
+     *
+     * <p>Two deliberate differences from a real event. It goes to <b>one</b> endpoint rather than
+     * fanning out, because the question being answered is "does this endpoint work", not "does
+     * delivery work". And it ignores that endpoint's event-type filter — a test that silently
+     * delivered nothing because {@code endpoint.test} was not in the subscription list would tell
+     * the operator exactly the wrong thing.
+     */
+    @Transactional
+    public WebhookEvent sendTestEvent(String merchantId, WebhookEndpoint endpoint) {
+        String eventId = Ids.generate("evt");
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("object", "endpoint_test");
+        data.put("endpoint_id", endpoint.getId());
+        data.put("message", "If you are reading this, your endpoint is reachable and your "
+                + "signature check accepted it.");
+
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("id", eventId);
+        envelope.put("object", "event");
+        envelope.put("type", "endpoint.test");
+        envelope.put("created", Instant.now().getEpochSecond());
+        envelope.put("livemode", false);
+        envelope.put("data", Map.of("object", data));
+
+        try {
+            WebhookEvent event = events.save(new WebhookEvent(eventId, merchantId, "endpoint.test",
+                    mapper.writeValueAsString(envelope), endpoint.getUrl(), endpoint.getId()));
+            log.info("Queued test event {} for endpoint {}", eventId, endpoint.getId());
+            return event;
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not serialise test event", e);
+        }
+    }
+
+    /**
      * The dispatcher.
      *
      * <p>Single-threaded and polling, which is honest for a teaching implementation. At real volume

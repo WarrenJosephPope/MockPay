@@ -55,12 +55,20 @@ public class Merchant {
         return name;
     }
 
+    public void setName(String name) {
+        this.name = name;
+    }
+
     public String getSettlementCurrency() {
         return settlementCurrency;
     }
 
     public String getMcc() {
         return mcc;
+    }
+
+    public void setMcc(String mcc) {
+        this.mcc = mcc;
     }
 
     public String getCountry() {

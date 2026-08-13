@@ -72,6 +72,51 @@ public class AccountService {
         return merchant;
     }
 
+    /**
+     * Update the parts of an account that are safe to change.
+     *
+     * <p>Name and merchant category code are editable. <b>Settlement currency and country are
+     * not</b>, and refusing them is the interesting part: every existing payment, ledger entry and
+     * settlement on the account is denominated in that currency. Changing it retroactively would
+     * not convert anything — it would silently relabel a book of GBP as USD and misstate every
+     * balance. Country is locked for a related reason: it drives acquirer routing, and existing
+     * authorisations were routed on the old value.
+     *
+     * <p>Real gateways handle this by making you open a second account.
+     */
+    @Transactional
+    public Merchant updateAccount(String merchantId, String name, String mcc,
+                                  String attemptedCurrency, String attemptedCountry) {
+        Merchant merchant = merchants.findById(merchantId)
+                .orElseThrow(() -> ApiException.notFound("account"));
+
+        if (attemptedCurrency != null
+                && !attemptedCurrency.equalsIgnoreCase(merchant.getSettlementCurrency())) {
+            throw new ApiException(400, "invalid_request_error", "currency_immutable",
+                    "Settlement currency cannot be changed: existing payments, ledger entries and "
+                            + "settlements are denominated in " + merchant.getSettlementCurrency()
+                            + ", and relabelling them would misstate every balance. "
+                            + "Open a separate account instead.");
+        }
+        if (attemptedCountry != null && !attemptedCountry.equalsIgnoreCase(merchant.getCountry())) {
+            throw new ApiException(400, "invalid_request_error", "country_immutable",
+                    "Account country cannot be changed: it determines acquirer routing, and "
+                            + "existing authorisations were routed on the current value.");
+        }
+
+        if (name != null && !name.isBlank()) {
+            merchant.setName(name.trim());
+        }
+        if (mcc != null && !mcc.isBlank()) {
+            if (!mcc.matches("\\d{4}")) {
+                throw new ApiException(400, "invalid_request_error", "invalid_mcc",
+                        "A merchant category code is four digits (ISO 18245).");
+            }
+            merchant.setMcc(mcc);
+        }
+        return merchants.save(merchant);
+    }
+
     @Transactional
     public WebhookEndpoint addEndpoint(String merchantId, String url, String description,
                                        String eventTypes) {

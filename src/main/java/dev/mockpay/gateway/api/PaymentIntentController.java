@@ -168,26 +168,7 @@ public class PaymentIntentController {
     @GetMapping("/{id}/transactions")
     public Map<String, Object> transactions(@PathVariable String id) {
         List<Transaction> txns = payments.transactionsFor(RequestContext.merchantId(), id);
-        List<Map<String, Object>> data = txns.stream().map(t -> {
-            Map<String, Object> map = new LinkedHashMap<>();
-            map.put("id", t.getId());
-            map.put("type", t.getType().name().toLowerCase());
-            map.put("outcome", t.getOutcome() == null ? null : t.getOutcome().name().toLowerCase());
-            map.put("amount", t.getAmount());
-            map.put("currency", t.getCurrency());
-            map.put("mti", t.getMti());
-            map.put("response_code", t.getResponseCode());
-            map.put("response_text", t.getResponseText());
-            map.put("auth_code", t.getAuthCode());
-            map.put("rrn", t.getRrn());
-            map.put("rail", t.getRailName());
-            map.put("acquirer", t.getAcquirerId());
-            map.put("latency_ms", t.getLatencyMs());
-            map.put("request", t.getRequestDump());
-            map.put("response", t.getResponseDump());
-            map.put("created", t.getCreatedAt().getEpochSecond());
-            return map;
-        }).toList();
+        List<Map<String, Object>> data = txns.stream().map(payments::snapshot).toList();
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("object", "list");

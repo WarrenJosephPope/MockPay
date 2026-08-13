@@ -145,7 +145,21 @@ public class SecurityConfig {
                 .exceptionHandling(ex -> ex
                         // 401 JSON, never a redirect to a login page. The caller is a fetch() in a
                         // SPA; an HTML redirect would surface as an unparseable response.
-                        .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
+                        .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
+                        // Access denials — a missing or stale CSRF token, most often — are raised by
+                        // the filter chain, before any controller runs, so ErrorHandler never sees
+                        // them. Without this they come back in Spring's default shape and a client
+                        // that parses `error.code` chokes on the one response it most needs to
+                        // understand.
+                        .accessDeniedHandler((request, response, denied) -> {
+                            response.setStatus(HttpStatus.FORBIDDEN.value());
+                            response.setContentType("application/json");
+                            response.getWriter().write("""
+                                    {"error":{"type":"permission_error","code":"access_denied",\
+                                    "message":"Request rejected. If this was a state-changing \
+                                    request, include the CSRF token from the XSRF-TOKEN cookie \
+                                    in an X-XSRF-TOKEN header."}}""");
+                        }))
                 .logout(logout -> logout.disable())
                 .build();
     }

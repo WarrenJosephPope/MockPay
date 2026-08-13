@@ -629,6 +629,35 @@ public class PaymentService {
         return transactions.findByPaymentIntentIdOrderByCreatedAtAsc(intentId);
     }
 
+    /**
+     * The public JSON shape of one rail message, including the pseudo-8583 dump.
+     *
+     * <p>Lives here rather than in a controller because two surfaces render it — the {@code /v1}
+     * trace endpoint and the dashboard's payment detail — and a trace that differs between them
+     * would be actively misleading during an investigation.
+     */
+    public Map<String, Object> snapshot(Transaction txn) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("id", txn.getId());
+        map.put("object", "transaction");
+        map.put("type", txn.getType().name().toLowerCase());
+        map.put("outcome", txn.getOutcome() == null ? null : txn.getOutcome().name().toLowerCase());
+        map.put("amount", txn.getAmount());
+        map.put("currency", txn.getCurrency());
+        map.put("mti", txn.getMti());
+        map.put("response_code", txn.getResponseCode());
+        map.put("response_text", txn.getResponseText());
+        map.put("auth_code", txn.getAuthCode());
+        map.put("rrn", txn.getRrn());
+        map.put("rail", txn.getRailName());
+        map.put("acquirer", txn.getAcquirerId());
+        map.put("latency_ms", txn.getLatencyMs());
+        map.put("request", txn.getRequestDump());
+        map.put("response", txn.getResponseDump());
+        map.put("created", txn.getCreatedAt().getEpochSecond());
+        return map;
+    }
+
     /** The public JSON shape of a PaymentIntent, used for both API responses and webhook payloads. */
     public Map<String, Object> snapshot(PaymentIntent intent) {
         Map<String, Object> map = new LinkedHashMap<>();

@@ -2,6 +2,7 @@ package dev.mockpay.gateway.api;
 
 import dev.mockpay.gateway.domain.ApiKey;
 import dev.mockpay.gateway.domain.Membership;
+import dev.mockpay.gateway.domain.PaymentIntent;
 import dev.mockpay.gateway.repo.MerchantRepository;
 import dev.mockpay.gateway.repo.PaymentIntentRepository;
 import dev.mockpay.gateway.service.AccountService;
@@ -10,6 +11,9 @@ import dev.mockpay.gateway.service.ApiKeyService;
 import dev.mockpay.gateway.service.AuditService;
 import dev.mockpay.gateway.service.EmailService;
 import dev.mockpay.gateway.service.EventService;
+import dev.mockpay.gateway.service.IdempotencyService;
+import dev.mockpay.gateway.service.LedgerService;
+import dev.mockpay.gateway.service.PaymentSearch;
 import dev.mockpay.gateway.service.PaymentService;
 import dev.mockpay.gateway.service.RefundService;
 import dev.mockpay.gateway.service.UserService;
@@ -24,10 +28,14 @@ import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -72,11 +80,16 @@ public class DashboardController {
     private final boolean smtpConfigured;
     private final MerchantRepository merchants;
     private final PaymentIntentRepository intents;
+    private final PaymentSearch search;
+    private final LedgerService ledger;
+    private final IdempotencyService idempotency;
 
     public DashboardController(UserService users, AccountService accounts, ApiKeyService apiKeys,
                                PaymentService payments, RefundService refunds, EventService events,
                                AuditService audit, EmailService email,
                                MerchantRepository merchants, PaymentIntentRepository intents,
+                               PaymentSearch search, LedgerService ledger,
+                               IdempotencyService idempotency,
                                org.springframework.core.env.Environment environment) {
         this.users = users;
         this.accounts = accounts;
@@ -89,6 +102,9 @@ public class DashboardController {
         this.smtpConfigured = !environment.getProperty("spring.mail.host", "").isBlank();
         this.merchants = merchants;
         this.intents = intents;
+        this.search = search;
+        this.ledger = ledger;
+        this.idempotency = idempotency;
     }
 
     // ----------------------------------------------------------------- bodies
@@ -110,6 +126,10 @@ public class DashboardController {
     }
 
     public record SwitchAccountRequest(@NotBlank String merchant_id) {
+    }
+
+    public record UpdateAccountRequest(String name, String mcc, String settlement_currency,
+                                       String country) {
     }
 
     // -------------------------------------------------------------------- me
@@ -149,6 +169,36 @@ public class DashboardController {
         return me(request);
     }
 
+    // --------------------------------------------------------------- account
+
+    @GetMapping("/account")
+    public Map<String, Object> account(HttpServletRequest request) {
+        var actor = actor(request);
+        actor.require(Membership.Role.VIEWER);
+        return accountSnapshot(merchants.findById(actor.merchantId()).orElseThrow());
+    }
+
+    /**
+     * Edit the account profile.
+     *
+     * <p>ADMIN, not OWNER: the name and category code are operational settings, and the things that
+     * genuinely cannot be undone — currency and country — are refused outright rather than gated on
+     * a role. See {@code AccountService.updateAccount} for why.
+     */
+    @PatchMapping("/account")
+    public Map<String, Object> updateAccount(@RequestBody UpdateAccountRequest body,
+                                             HttpServletRequest request) {
+        var actor = actor(request);
+        actor.require(Membership.Role.ADMIN);
+
+        var merchant = accounts.updateAccount(actor.merchantId(), body.name(), body.mcc(),
+                body.settlement_currency(), body.country());
+        audit.record(actor.merchantId(), actor.user().getId(), actor.user().getEmail(),
+                "account.updated", "merchant", actor.merchantId(),
+                Map.of("name", merchant.getName(), "mcc", merchant.getMcc()));
+        return accountSnapshot(merchant);
+    }
+
     // -------------------------------------------------------------- api keys
 
     @GetMapping("/api-keys")
@@ -159,9 +209,18 @@ public class DashboardController {
                 .map(k -> apiKeys.snapshot(k, null)).toList());
     }
 
+    /**
+     * Issue a key.
+     *
+     * <p>Send an {@code Idempotency-Key} header. A dashboard button is clicked twice more often
+     * than an API is called twice, and without a key a double click issues two secret keys — one of
+     * which the operator never sees again and cannot tell apart from a leak.
+     */
     @PostMapping("/api-keys")
-    public ResponseEntity<Map<String, Object>> createKey(@RequestBody CreateKeyRequest body,
-                                                         HttpServletRequest request) {
+    public ResponseEntity<Map<String, Object>> createKey(
+            @RequestBody CreateKeyRequest body,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            HttpServletRequest request) {
         var actor = actor(request);
         // ADMIN, not DEVELOPER: a secret key is unlimited authority over the account, so issuing
         // one is equivalent to granting that authority to whoever receives it.
@@ -169,13 +228,19 @@ public class DashboardController {
 
         ApiKey.Type type = "publishable".equalsIgnoreCase(body.type())
                 ? ApiKey.Type.PUBLISHABLE : ApiKey.Type.SECRET;
-        var issued = apiKeys.issue(actor.merchantId(), type, body.name());
 
-        audit.record(actor.merchantId(), actor.user().getId(), actor.user().getEmail(),
-                "api_key.created", "api_key", issued.record().getId(),
-                Map.of("type", type, "prefix", issued.record().getKeyPrefix()));
+        var outcome = idempotency.execute(actor.merchantId(), idempotencyKey, "POST",
+                "/dashboard/api-keys", body, () -> {
+                    var issued = apiKeys.issue(actor.merchantId(), type, body.name());
+                    audit.record(actor.merchantId(), actor.user().getId(), actor.user().getEmail(),
+                            "api_key.created", "api_key", issued.record().getId(),
+                            Map.of("type", type, "prefix", issued.record().getKeyPrefix()));
+                    return apiKeys.snapshot(issued.record(), issued.plaintext());
+                });
 
-        return ResponseEntity.status(201).body(apiKeys.snapshot(issued.record(), issued.plaintext()));
+        return ResponseEntity.status(outcome.replayed() ? 200 : 201)
+                .header("Idempotent-Replayed", String.valueOf(outcome.replayed()))
+                .body(outcome.body());
     }
 
     @PostMapping("/api-keys/{id}/revoke")
@@ -200,19 +265,54 @@ public class DashboardController {
     }
 
     @PostMapping("/webhook-endpoints")
-    public ResponseEntity<Map<String, Object>> createEndpoint(@RequestBody EndpointRequest body,
-                                                              HttpServletRequest request) {
+    public ResponseEntity<Map<String, Object>> createEndpoint(
+            @RequestBody EndpointRequest body,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            HttpServletRequest request) {
         var actor = actor(request);
         // DEVELOPER is enough: configuring where events are delivered is integration work and
         // moves no money.
         actor.require(Membership.Role.DEVELOPER);
 
-        var endpoint = accounts.addEndpoint(actor.merchantId(), body.url(), body.description(),
-                joinEvents(body.enabled_events()));
+        var outcome = idempotency.execute(actor.merchantId(), idempotencyKey, "POST",
+                "/dashboard/webhook-endpoints", body, () -> {
+                    var endpoint = accounts.addEndpoint(actor.merchantId(), body.url(),
+                            body.description(), joinEvents(body.enabled_events()));
+                    audit.record(actor.merchantId(), actor.user().getId(), actor.user().getEmail(),
+                            "webhook_endpoint.created", "webhook_endpoint", endpoint.getId(),
+                            Map.of("url", endpoint.getUrl()));
+                    return accounts.snapshot(endpoint);
+                });
+
+        return ResponseEntity.status(outcome.replayed() ? 200 : 201)
+                .header("Idempotent-Replayed", String.valueOf(outcome.replayed()))
+                .body(outcome.body());
+    }
+
+    /**
+     * Send a synthetic event to one endpoint.
+     *
+     * <p>The first thing anyone wants when a webhook integration is not working: proof the gateway
+     * can reach the URL at all, and that the receiver's signature check accepts what it sends.
+     */
+    @PostMapping("/webhook-endpoints/{id}/test")
+    public Map<String, Object> testEndpoint(@PathVariable String id, HttpServletRequest request) {
+        var actor = actor(request);
+        actor.require(Membership.Role.DEVELOPER);
+
+        var endpoint = accounts.mustFindEndpoint(actor.merchantId(), id);
+        var event = events.sendTestEvent(actor.merchantId(), endpoint);
         audit.record(actor.merchantId(), actor.user().getId(), actor.user().getEmail(),
-                "webhook_endpoint.created", "webhook_endpoint", endpoint.getId(),
-                Map.of("url", endpoint.getUrl()));
-        return ResponseEntity.status(201).body(accounts.snapshot(endpoint));
+                "webhook_endpoint.tested", "webhook_endpoint", id, Map.of("event", event.getId()));
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("event_id", event.getId());
+        response.put("endpoint_id", endpoint.getId());
+        response.put("url", endpoint.getUrl());
+        // Queued, not delivered: the dispatcher picks it up within a couple of seconds. Poll
+        // /dashboard/events to see how it went.
+        response.put("status", "queued");
+        return response;
     }
 
     @PatchMapping("/webhook-endpoints/{id}")
@@ -243,15 +343,37 @@ public class DashboardController {
 
     // -------------------------------------------------------------- payments
 
+    /**
+     * The dashboard's main screen.
+     *
+     * <p>Every filter is optional and they compose. Dates are ISO calendar days, interpreted in UTC
+     * and half-open ({@code from} inclusive, {@code to} exclusive) so that asking for a single day
+     * returns that whole day without the caller reasoning about midnight.
+     */
     @GetMapping("/payments")
     public Map<String, Object> listPayments(@RequestParam(defaultValue = "0") int page,
                                             @RequestParam(defaultValue = "20") int limit,
+                                            @RequestParam(required = false) String status,
+                                            @RequestParam(required = false) String created_from,
+                                            @RequestParam(required = false) String created_to,
+                                            @RequestParam(required = false) Long amount_min,
+                                            @RequestParam(required = false) Long amount_max,
+                                            @RequestParam(required = false) String last4,
+                                            @RequestParam(required = false) String query,
                                             HttpServletRequest request) {
         var actor = actor(request);
         actor.require(Membership.Role.VIEWER);
 
-        var results = intents.findByMerchantIdOrderByCreatedAtDesc(
-                actor.merchantId(), PageRequest.of(page, Math.min(limit, 100)));
+        var filters = new PaymentSearch.Filters(
+                parseStatus(status),
+                parseDay(created_from, false),
+                parseDay(created_to, true),
+                amount_min, amount_max, last4, query);
+
+        var results = search.find(actor.merchantId(), filters,
+                PageRequest.of(page, Math.min(limit, 100),
+                        org.springframework.data.domain.Sort.by(
+                                org.springframework.data.domain.Sort.Direction.DESC, "createdAt")));
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("object", "list");
@@ -267,10 +389,26 @@ public class DashboardController {
         actor.require(Membership.Role.VIEWER);
 
         var intent = payments.mustFind(actor.merchantId(), id);
+
         Map<String, Object> map = new LinkedHashMap<>(payments.snapshot(intent));
-        map.put("transactions", payments.transactionsFor(actor.merchantId(), id).size());
+        // The full rail trace, not a count. Reading the 0100 and 0110 for a payment is how you
+        // answer "why was this declined" without asking the acquirer.
+        map.put("transactions", payments.transactionsFor(actor.merchantId(), id).stream()
+                .map(payments::snapshot).toList());
         map.put("refunds", refunds.forPaymentIntent(actor.merchantId(), id).stream()
                 .map(refunds::snapshot).toList());
+        // And the double-entry journals, so the money can be followed from this one screen.
+        map.put("ledger", ledger.forReference(id).stream().map(e -> {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("id", e.getId());
+            entry.put("journal", e.getJournalId());
+            entry.put("account", e.getAccount().name());
+            entry.put("direction", e.getDirection().name());
+            entry.put("amount", e.getAmount());
+            entry.put("currency", e.getCurrency());
+            entry.put("memo", e.getMemo());
+            return entry;
+        }).toList());
         return map;
     }
 
@@ -281,17 +419,28 @@ public class DashboardController {
      * the account and still cannot move a penny out of it.
      */
     @PostMapping("/refunds")
-    public ResponseEntity<Map<String, Object>> refund(@Valid @RequestBody RefundRequest body,
-                                                      HttpServletRequest request) {
+    public ResponseEntity<Map<String, Object>> refund(
+            @Valid @RequestBody RefundRequest body,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            HttpServletRequest request) {
         var actor = actor(request);
         actor.require(Membership.Role.ADMIN);
 
-        var refund = refunds.create(actor.merchantId(), body.payment_intent(), body.amount(),
-                body.reason());
-        audit.record(actor.merchantId(), actor.user().getId(), actor.user().getEmail(),
-                "refund.issued", "refund", refund.getId(),
-                Map.of("payment_intent", body.payment_intent(), "amount", refund.getAmount()));
-        return ResponseEntity.status(201).body(refunds.snapshot(refund));
+        // The one place on the dashboard where a duplicate submission costs real money.
+        var outcome = idempotency.execute(actor.merchantId(), idempotencyKey, "POST",
+                "/dashboard/refunds", body, () -> {
+                    var refund = refunds.create(actor.merchantId(), body.payment_intent(),
+                            body.amount(), body.reason());
+                    audit.record(actor.merchantId(), actor.user().getId(), actor.user().getEmail(),
+                            "refund.issued", "refund", refund.getId(),
+                            Map.of("payment_intent", body.payment_intent(),
+                                    "amount", refund.getAmount()));
+                    return refunds.snapshot(refund);
+                });
+
+        return ResponseEntity.status(outcome.replayed() ? 200 : 201)
+                .header("Idempotent-Replayed", String.valueOf(outcome.replayed()))
+                .body(outcome.body());
     }
 
     // ---------------------------------------------------------------- events
@@ -457,6 +606,52 @@ public class DashboardController {
                 403, "permission_error", "no_access", "You no longer have access to this account."));
 
         return new DashboardSession.Actor(user, membership);
+    }
+
+    private PaymentIntent.Status parseStatus(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return PaymentIntent.Status.valueOf(raw.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new ApiException(400, "invalid_request_error", "invalid_status",
+                    "Unknown status '" + raw + "'.");
+        }
+    }
+
+    /**
+     * An ISO calendar day to an instant, in UTC.
+     *
+     * @param exclusiveEnd when true, returns the start of the <em>next</em> day, so a range of one
+     *                     day to itself covers that entire day
+     */
+    private Instant parseDay(String raw, boolean exclusiveEnd) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            LocalDate day = LocalDate.parse(raw.trim());
+            return (exclusiveEnd ? day.plusDays(1) : day).atStartOfDay(ZoneOffset.UTC).toInstant();
+        } catch (Exception e) {
+            throw new ApiException(400, "invalid_request_error", "invalid_date",
+                    "Dates must be ISO calendar days, e.g. 2026-08-14.");
+        }
+    }
+
+    private Map<String, Object> accountSnapshot(dev.mockpay.gateway.domain.Merchant merchant) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("id", merchant.getId());
+        map.put("object", "account");
+        map.put("name", merchant.getName());
+        map.put("mcc", merchant.getMcc());
+        // Returned so the UI can display them, and flagged so it can render them read-only rather
+        // than offering an edit that will be refused.
+        map.put("settlement_currency", merchant.getSettlementCurrency());
+        map.put("country", merchant.getCountry());
+        map.put("immutable_fields", List.of("settlement_currency", "country"));
+        map.put("created", merchant.getCreatedAt().getEpochSecond());
+        return map;
     }
 
     private Membership.Role parseRole(String raw) {

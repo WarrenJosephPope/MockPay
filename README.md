@@ -26,6 +26,22 @@ Requires **Java 17+**.
 
 H2 in memory. Everything is wiped when the process exits. Good for the demo and the test suite.
 
+### Working on the dashboard
+
+The UI is a React + TypeScript app in `dashboard/`, built into the jar by Maven — there is nothing
+separate to deploy. For hot reload:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d
+./mvnw spring-boot:run -Dspring-boot.run.profiles=postgres   # terminal 1
+cd dashboard && npm run dev                                   # terminal 2 → http://localhost:5173
+```
+
+Vite proxies every API path to :8088, so the session cookie stays same-origin.
+
+`src/api.ts` is the only module that talks to the gateway. It attaches the CSRF token and a fresh
+idempotency key to every mutating request, so no page has to remember either.
+
 ### Seeing the emails
 
 With no `MOCKPAY_SMTP_HOST` set, nothing is sent — each message is written to the log in full,
@@ -60,11 +76,16 @@ docker compose up -d --build
 docker compose logs -f gateway
 ```
 
-Whichever you pick, open **<http://localhost:8088/>** for the demo checkout.
+Whichever you pick, open **<http://localhost:8088/>** for the **dashboard**, and
+**<http://localhost:8088/checkout>** for the demo storefront.
+
+Sign up on the dashboard to create your own account and keys, or sign in with a seeded demo account
+below.
 
 | | |
 |---|---|
-| Demo checkout | <http://localhost:8088/> |
+| Dashboard | <http://localhost:8088/> |
+| Demo checkout | <http://localhost:8088/checkout> |
 | Test instruments | <http://localhost:8088/v1/public/test_instruments> |
 | Webhook sink | <http://localhost:8088/webhook-sink/received> |
 | H2 console | <http://localhost:8088/h2-console> — option 1 only (JDBC `jdbc:h2:mem:mockpay`, user `sa`, no password) |
@@ -209,22 +230,42 @@ DE126  Private Use - 3DS/CAVV             CAVV=Z2NKVUE3dHdpVHVSYlFOMG8ySmg=;ECI=
 
 ## From a browser
 
-Include the SDK and use a publishable key. The card number goes from the customer's keyboard
-straight to the gateway — your backend never sees it, which is the point.
+Two ways to integrate, and the difference is mostly about **PCI scope** — specifically, which
+document the card number is typed into.
+
+### 1. Hosted checkout — recommended
 
 ```html
 <script src="http://localhost:8088/mockpay.js"></script>
 <script>
 const mockpay = MockPay('pk_test_demo_us_publishable');
 
-// 1. Tokenise
-const { paymentMethod, error } = await mockpay.createPaymentMethod({
+// clientSecret comes from a PaymentIntent your server created.
+mockpay.open({
+  clientSecret,
+  onSuccess: (r) => confirmOrderOnYourServer(r.paymentIntentId),
+  onFailure: (e) => showMessage(e.message),
+  onClose:   ()  => {},
+});
+</script>
+```
+
+Opens MockPay's own payment page in an iframe over your site. Card, UPI and wallet are all handled
+there, including 3-D Secure — the challenge renders in a nested frame, so the customer never leaves
+your page and a closed popup cannot strand the payment.
+
+You write **no payment form at all**. The fields belong to the gateway's document, so same-origin
+policy means your JavaScript cannot read them even by accident, and neither can anything injected
+into your page. That is the difference between **SAQ A-EP and SAQ A**.
+
+### 2. Your own form
+
+```js
+const { paymentMethod } = await mockpay.createPaymentMethod({
   type: 'card',
   card: { number: '4242424242424242', exp_month: 12, exp_year: 2030, cvc: '123' }
 });
 
-// 2. Confirm. clientSecret comes from a PaymentIntent your server created.
-//    The SDK handles 3DS challenges and redirects, and waits for the outcome.
 const result = await mockpay.confirmPayment({
   clientSecret,
   paymentMethod: paymentMethod.id,
@@ -233,12 +274,39 @@ const result = await mockpay.confirmPayment({
 
 if (result.error) showDeclineMessage(result.error.message);
 else fulfilOrder(result.paymentIntent);
-</script>
 ```
 
-`confirmPayment` resolves only when the payment reaches a terminal state — including after a 3-D
-Secure challenge or a wallet redirect. It reads the outcome from the server rather than inferring it
-from the popup closing, because a customer who pays and then closes the window has still paid.
+Total control of the UI. The card number still never reaches your **server**, but it does pass
+through your page's DOM — so your page joins the cardholder data environment, and a compromised
+script on it can skim the number. That is the Magecart attack, and it is why mode 1 exists.
+
+`confirmPayment` resolves only at a terminal state, including after a 3-D Secure challenge, and it
+reads the outcome from the server rather than inferring it from a popup closing.
+
+Both modes are demonstrable side by side at **<http://localhost:8088/checkout>**.
+
+### A callback is not proof of payment
+
+`onSuccess` fires from a `postMessage` sent by the iframe. The SDK checks the message came from the
+gateway's origin and has the expected shape — without that, any page could post "payment succeeded"
+and you would ship goods nobody paid for.
+
+Even so, **treat it as a UI signal only**. Confirm on your server from the webhook, or by fetching
+the intent with your secret key, before you fulfil anything. A customer controls their browser
+completely; they do not control your webhook. The demo checkout shows this: on `onSuccess` it calls
+its own backend to re-check before declaring the order paid.
+
+### Letting your site embed the page
+
+The hosted page sends `Content-Security-Policy: frame-ancestors`, which defaults to `'self'`. To
+embed it from another origin, list it:
+
+```bash
+MOCKPAY_FRAME_ANCESTORS="'self' https://shop.example https://*.example.com"
+```
+
+Left open to everyone it would invite clickjacking — an attacker framing the genuine payment page
+and overlaying invisible controls over it.
 
 ---
 
@@ -449,6 +517,21 @@ Replay with `POST /v1/events/{id}/replay`.
 
 ---
 
+## The dashboard
+
+| Screen | What it shows |
+|---|---|
+| **Payments** | Filter by status, date, amount, card last four, or free text |
+| **Payment detail** | The full ISO 8583 trace, the double-entry ledger, refunds — and a refund button for ADMIN and above |
+| **API keys** | Issue, rotate and revoke. A new secret is shown once, then only its prefix. |
+| **Webhook endpoints** | Per-endpoint secrets, event filters, and a "send test" button |
+| **Event log** | Every delivery attempt, with backoff state and a replay button |
+| **Team** | Invite by email, change roles, remove members |
+| **Audit log** | Who did what, from which IP |
+| **Settings** | Business profile; currency and country are shown read-only and refused if edited |
+
+Controls are hidden by role as a courtesy — the server enforces every one of them independently.
+
 ## What is modelled
 
 | | Where |
@@ -473,6 +556,11 @@ Replay with `POST /v1/events/{id}/replay`.
 | Roles and per-endpoint authority | `domain/Membership.java`, `api/DashboardController.java` |
 | Append-only audit trail | `service/AuditService.java` |
 | Composable payment filtering | `service/PaymentSearch.java` |
+| A storefront's own backend, holding the secret key | `api/DemoController.java` |
+| Hosted payment page — card fields on the gateway's origin | `static/checkout/hosted.html` |
+| Iframe overlay, origin-checked postMessage | `static/mockpay.js` |
+| Clickjacking policy that survives forwarded routes | `config/FrameEmbeddingConfig.java` |
+| CSRF + idempotency handled once, for every page | `dashboard/src/api.ts` |
 | Password reset, hashed single-use tokens | `service/UserService.java`, `domain/PasswordResetToken.java` |
 | Email with a console fallback | `service/EmailService.java` |
 | Sign out everywhere | `service/SessionRegistry.java` |
@@ -487,7 +575,7 @@ Hover over a type in your IDE to read it.
 
 ## Testing
 
-227 end-to-end assertions across every flow:
+253 end-to-end assertions across every flow:
 
 ```bash
 bash scripts/smoke-test.sh
@@ -528,6 +616,7 @@ containers. Running from the CLI, export them or let the defaults apply. `.env` 
 | `MOCKPAY_SETTLEMENT_ZONE` | `UTC` | Which timezone the settlement *day* is measured in |
 | `MOCKPAY_COOKIE_SECURE` | `false` | Set true behind TLS; the browser drops secure cookies on plain HTTP |
 | `MOCKPAY_SESSION_TIMEOUT` | `8h` | Dashboard session lifetime |
+| `MOCKPAY_FRAME_ANCESTORS` | `'self'` | Which origins may embed the hosted payment page |
 | `MOCKPAY_SMTP_HOST` | *(empty)* | **Empty means emails are written to the log instead of sent** |
 | `MOCKPAY_SMTP_PORT` / `_USERNAME` / `_PASSWORD` | `1025` / — / — | SMTP credentials |
 | `MOCKPAY_SMTP_AUTH` / `_STARTTLS` | `false` | Turn both on for a real provider |
@@ -566,7 +655,7 @@ failure rather than a missing column discovered in production.
 
 - **Not PCI compliant, and not trying to be.** It accepts card numbers over plain HTTP on localhost.
   Never send it a real card number.
-- **Not a production gateway.** No clustering, no HSM, no real rails, no merchant signup.
+- **Not a production gateway.** No clustering, no HSM, no real rails.
 - **Not exhaustive.** Instalments, multi-party payouts, FX, and subscriptions are out of scope.
 
 The simulated rails are the honest part: they reproduce the *shape* and *semantics* of card, UPI, and
@@ -580,10 +669,11 @@ interesting engineering is everything in front of the rail, and that part is rea
 ```
 gateway-service/
 ├── .env.example                every setting, documented
+├── dashboard/                  React + TypeScript dashboard (built into the jar)
 ├── docker-compose.yml          Postgres + the gateway
 ├── docker-compose.dev.yml      Postgres only; run the app from the CLI
 ├── Dockerfile                  multi-stage build, non-root runtime
-├── scripts/smoke-test.sh       227 end-to-end assertions
+├── scripts/smoke-test.sh       253 end-to-end assertions
 ├── volumes/postgres/           bind-mounted database files (gitignored)
 └── src/main/
     ├── java/dev/mockpay/gateway/

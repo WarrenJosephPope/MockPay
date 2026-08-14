@@ -75,8 +75,10 @@
   <header>
     <h1>MockPay demo checkout</h1>
     <div class="sub">
-      A real payment flow with simulated rails. The card number never reaches the demo store's
-      backend &mdash; it goes from this page straight to the gateway and comes back as a token.
+      A real payment flow with simulated rails. This page holds <strong>no secrets</strong>: its
+      backend creates the payment and hands the browser only a client secret. Switch between the
+      two integration modes below &mdash; the difference is which document the card number is typed
+      into, and that determines the store's PCI scope.
     </div>
   </header>
 
@@ -85,6 +87,13 @@
       <h2>Pay</h2>
       <div class="hint">One pair of AirPods &mdash; $49.99</div>
 
+      <div class="tabs" role="tablist" style="margin-bottom:14px">
+        <button role="tab" aria-selected="true" data-mode="hosted">Hosted checkout</button>
+        <button role="tab" aria-selected="false" data-mode="inline">Own form</button>
+      </div>
+      <div class="muted" id="mode-note" style="font-size:12.5px;margin-bottom:16px"></div>
+
+      <div id="inline-fields" hidden>
       <div class="tabs" role="tablist">
         <button role="tab" aria-selected="true" data-method="card">Card</button>
         <button role="tab" aria-selected="false" data-method="upi">UPI</button>
@@ -116,6 +125,8 @@
         </select>
       </div>
 
+      </div><!-- /inline-fields -->
+
       <div class="row2">
         <div>
           <label for="amount">Amount (minor units)</label>
@@ -139,14 +150,11 @@
 
       <div class="status" id="status"></div>
 
-      <div class="actions">
-        <button id="btn-capture" disabled>Capture</button>
-        <button id="btn-refund" disabled>Refund</button>
-        <button id="btn-cancel" disabled>Cancel / void</button>
-        <button id="btn-dispute" disabled>Open dispute</button>
-      </div>
-
       <button class="ghost" id="btn-trace" disabled>Show the ISO 8583 trace</button>
+      <div class="muted" style="font-size:12.5px;margin-top:12px">
+        Capture, refunds and disputes live in the <a href="/">dashboard</a> &mdash; a storefront
+        does not issue refunds from its own checkout page.
+      </div>
     </div>
 
     <div class="card">
@@ -167,17 +175,24 @@
 <script src="/mockpay.js"></script>
 <script>
 /*
- * NOTE: this page calls the gateway's *secret-key* endpoints directly (creating the intent,
- * capturing, refunding) because it is a self-contained demo with no backend of its own. In a real
- * integration those calls belong on your server and the secret key never appears in a browser.
- * Only createPaymentMethod and confirmPayment — the two SDK calls — are genuinely client-side.
+ * This page holds NO secrets.
+ *
+ * It used to embed sk_test_demo_us_secret so it could create PaymentIntents and capture and refund
+ * them - a shortcut taken because the page had no server of its own. A secret key in page source
+ * lets any visitor refund, capture and read every payment on the account, so it was the one thing
+ * in this project that modelled bad practice.
+ *
+ * The real shape is what you see now:
+ *   /demo/checkout-session   the storefront's OWN backend. It holds the secret key and returns
+ *                            only a client secret, good for this one payment and nothing else.
+ *   mockpay.js               tokenises and confirms using the publishable key + client secret.
+ *
+ * Administrative actions moved to the dashboard, which is where they belong.
  */
-const SECRET_KEY = 'sk_test_demo_us_secret';
-const PUBLISHABLE_KEY = 'pk_test_demo_us_publishable';
-const mockpay = MockPay(PUBLISHABLE_KEY);
-
 let method = 'card';
-let currentIntent = null;
+let mode = 'hosted';  // 'hosted' = gateway's iframe; 'inline' = this page's own form
+let session = null;   // { payment_intent_id, client_secret, publishable_key }
+let mockpay = null;   // built once the backend tells us the publishable key
 
 const $ = (id) => document.getElementById(id);
 const stepsEl = $('steps');
@@ -188,7 +203,8 @@ function step(text, kind) {
   const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
   const row = document.createElement('div');
   row.className = 'step';
-  row.innerHTML = `<span class="t">${time}</span><span class="dot ${kind || ''}"></span><span>${text}</span>`;
+  row.innerHTML = '<span class="t">' + time + '</span><span class="dot ' + (kind || '') +
+                  '"></span><span>' + text + '</span>';
   stepsEl.appendChild(row);
   stepsEl.scrollTop = stepsEl.scrollHeight;
 }
@@ -202,31 +218,51 @@ function dump(obj) {
   outputEl.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
 }
 
-async function api(path, options) {
-  const response = await fetch(path, Object.assign({
-    headers: {
-      'Authorization': 'Bearer ' + SECRET_KEY,
-      'Content-Type': 'application/json',
-      // A fresh key per action. Reusing one across different requests is what the 422
-      // "idempotency_key_reused" error exists to catch.
-      'Idempotency-Key': crypto.randomUUID()
-    }
-  }, options));
+/** Calls to the storefront's own backend. No credentials: it knows who it is. */
+async function demo(path, options) {
+  const response = await fetch('/demo' + path, options);
   const body = await response.json();
   if (!response.ok) throw body.error || body;
   return body;
 }
 
-// --- tabs ------------------------------------------------------------------
-document.querySelectorAll('.tabs button').forEach(tab => {
+// --- integration mode ------------------------------------------------------
+const MODE_NOTES = {
+  hosted: 'The gateway renders the payment form in an iframe over this page. The card number is '
+        + 'typed into MockPay\'s document, so this page cannot read it even by accident \u2014 '
+        + 'and neither can anything injected into it. PCI SAQ A.',
+  inline: 'This page renders the form and passes the card to the SDK. The number never reaches '
+        + 'the store\'s server, but it does pass through this page\'s DOM \u2014 so a compromised '
+        + 'script here could skim it. PCI SAQ A-EP.'
+};
+
+function applyMode() {
+  $('inline-fields').hidden = mode !== 'inline';
+  $('mode-note').textContent = MODE_NOTES[mode];
+  $('pay').textContent = mode === 'hosted' ? 'Pay with MockPay' : 'Pay';
+}
+
+document.querySelectorAll('.tabs button[data-mode]').forEach(tab => {
   tab.onclick = () => {
-    document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-selected', 'false'));
+    document.querySelectorAll('.tabs button[data-mode]').forEach(b => b.setAttribute('aria-selected', 'false'));
+    tab.setAttribute('aria-selected', 'true');
+    mode = tab.dataset.mode;
+    applyMode();
+  };
+});
+
+// --- instrument tabs (inline mode only) ------------------------------------
+document.querySelectorAll('.tabs button[data-method]').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tabs button[data-method]').forEach(b => b.setAttribute('aria-selected', 'false'));
     tab.setAttribute('aria-selected', 'true');
     method = tab.dataset.method;
     ['card', 'upi', 'wallet'].forEach(m => { $('pane-' + m).hidden = m !== method; });
     if (method === 'upi') { $('currency').value = 'INR'; }
   };
 });
+
+applyMode();
 
 // --- test instrument chips -------------------------------------------------
 fetch('/v1/public/test_instruments').then(r => r.json()).then(data => {
@@ -251,10 +287,27 @@ fetch('/v1/public/test_instruments').then(r => r.json()).then(data => {
 $('pay').onclick = async () => {
   $('pay').disabled = true;
   stepsEl.innerHTML = '';
-  setActions(false);
+  $('btn-trace').disabled = true;
+  if (mode === 'hosted') return payHosted();
 
   try {
-    // 1. Tokenise in the browser. This is the only place the card number exists.
+    // 1. Ask OUR backend for a checkout session. This is the only step that needs a secret key,
+    //    and it happens server-side, where the key lives.
+    step('Asking the store backend for a checkout session');
+    session = await demo('/checkout-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        amount: parseInt($('amount').value, 10),
+        currency: $('currency').value,
+        capture_method: $('capture').value,
+        description: 'AirPods Pro'
+      })
+    });
+    mockpay = MockPay(session.publishable_key);
+    step('Session ' + session.payment_intent_id + ' - the browser holds only a client secret');
+
+    // 2. Tokenise in the browser. The card number goes straight to the gateway.
     step('Tokenising the instrument in the browser');
     const details = method === 'card'
       ? { type: 'card', card: {
@@ -271,49 +324,33 @@ $('pay').onclick = async () => {
     if (tokenised.error) throw tokenised.error;
     step('Token issued: ' + tokenised.paymentMethod.id, 'ok');
 
-    // 2. Create the intent. On a real site this happens on your server.
-    step('Creating the PaymentIntent (server-side in production)');
-    const intent = await api('/v1/payment_intents', {
-      method: 'POST',
-      body: JSON.stringify({
-        amount: parseInt($('amount').value, 10),
-        currency: $('currency').value,
-        capture_method: $('capture').value,
-        description: 'AirPods Pro',
-        statement_descriptor: 'DEMO STORE'
-      })
-    });
-    currentIntent = intent;
-    step('Intent ' + intent.id + ' → ' + intent.status);
-
-    // 3. Confirm from the browser, and let the SDK handle any challenge.
-    step('Confirming — risk scoring, authentication, then the rail');
-    show('Contacting the issuer…', 'busy');
+    // 3. Confirm. The SDK drives any 3DS challenge or redirect and waits for the outcome.
+    step('Confirming - risk scoring, authentication, then the rail');
+    show('Contacting the issuer...', 'busy');
 
     const result = await mockpay.confirmPayment({
-      clientSecret: intent.client_secret,
+      clientSecret: session.client_secret,
       paymentMethod: tokenised.paymentMethod.id,
       onAction: (action) => {
         step('Rail needs the customer: ' + action.type, 'warn');
-        show('Waiting for the customer to authenticate (OTP is 123456)…', 'busy');
+        show('Waiting for the customer to authenticate (OTP is 123456)...', 'busy');
       }
     });
 
-    const final = await api('/v1/payment_intents/' + intent.id);
-    currentIntent = final;
+    const final = await demo('/payments/' + session.payment_intent_id);
     dump(final);
+    $('btn-trace').disabled = false;
 
     if (result.error) {
       step('Ended: ' + (result.error.decline_code || result.error.code), 'bad');
       show(result.error.message, 'bad');
     } else if (final.status === 'requires_capture') {
-      step('Authorised — funds held, not yet claimed', 'ok');
-      show('Authorised. The hold is on the card; capture it when you ship.', 'ok');
+      step('Authorised - funds held, not yet claimed', 'ok');
+      show('Authorised. Capture it from the dashboard when you ship.', 'ok');
     } else {
-      step('Succeeded — auth code ' + (final.authorization_code || 'n/a'), 'ok');
+      step('Succeeded - auth code ' + (final.authorization_code || 'n/a'), 'ok');
       show('Payment succeeded.', 'ok');
     }
-    setActions(true);
   } catch (error) {
     dump(error);
     step('Failed: ' + (error.code || 'error'), 'bad');
@@ -323,59 +360,80 @@ $('pay').onclick = async () => {
   }
 };
 
-function setActions(enabled) {
-  const succeeded = enabled && currentIntent && currentIntent.status === 'succeeded';
-  const authorised = enabled && currentIntent && currentIntent.status === 'requires_capture';
-  $('btn-capture').disabled = !authorised;
-  $('btn-refund').disabled = !succeeded;
-  $('btn-cancel').disabled = !authorised;
-  $('btn-dispute').disabled = !succeeded;
-  $('btn-trace').disabled = !enabled || !currentIntent;
-}
-
-$('btn-capture').onclick = () => act('Capturing the authorised funds',
-  () => api('/v1/payment_intents/' + currentIntent.id + '/capture', { method: 'POST', body: '{}' }));
-
-$('btn-refund').onclick = () => act('Refunding — a new transaction, not an undo',
-  () => api('/v1/refunds', {
-    method: 'POST',
-    body: JSON.stringify({ payment_intent: currentIntent.id, reason: 'requested_by_customer' })
-  }));
-
-$('btn-cancel').onclick = () => act('Reversing the authorisation so the hold drops immediately',
-  () => api('/v1/payment_intents/' + currentIntent.id + '/cancel', { method: 'POST', body: '{}' }));
-
-$('btn-dispute').onclick = () => act('Filing a chargeback — funds are pulled back straight away',
-  () => api('/v1/disputes', {
-    method: 'POST',
-    body: JSON.stringify({ payment_intent: currentIntent.id, reason_code: '10.4' })
-  }));
-
-async function act(label, fn) {
-  step(label);
+/**
+ * Hosted mode: hand the whole payment UI to the gateway.
+ *
+ * All this page does is ask its own backend for a session and pass the client secret to the SDK.
+ * It renders no payment fields, so there is nothing on it for a skimmer to read.
+ */
+async function payHosted() {
   try {
-    const result = await fn();
-    dump(result);
-    const refreshed = await api('/v1/payment_intents/' + currentIntent.id);
-    currentIntent = refreshed;
-    step('Done → ' + (result.status || refreshed.status), 'ok');
-    show('Done.', 'ok');
-    setActions(true);
+    step('Asking the store backend for a checkout session');
+    session = await demo('/checkout-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        amount: parseInt($('amount').value, 10),
+        currency: $('currency').value,
+        capture_method: $('capture').value,
+        description: 'AirPods Pro'
+      })
+    });
+    mockpay = MockPay(session.publishable_key);
+    step('Opening MockPay in an iframe - this page never sees the card');
+    show('Complete the payment in the MockPay window.', 'busy');
+
+    mockpay.open({
+      clientSecret: session.client_secret,
+
+      onSuccess: async (result) => {
+        step('Gateway reported ' + result.status, 'ok');
+        // The postMessage is a UI signal, not proof. The store's BACKEND confirms before it
+        // treats the order as paid - which is what a real merchant must do, because a customer
+        // controls their own browser completely.
+        step('Backend re-checking the payment before fulfilling');
+        const confirmed = await demo('/payments/' + result.paymentIntentId);
+        dump(confirmed);
+        $('btn-trace').disabled = false;
+        $('pay').disabled = false;
+        if (confirmed.status === 'succeeded' || confirmed.status === 'requires_capture') {
+          step('Backend confirms: ' + confirmed.status, 'ok');
+          show('Payment confirmed by the store backend.', 'ok');
+        } else {
+          step('Backend disagrees: ' + confirmed.status, 'bad');
+          show('The gateway said one thing and the backend another - trust the backend.', 'bad');
+        }
+      },
+
+      onFailure: (error) => {
+        step('Declined: ' + (error.code || 'error'), 'bad');
+        show(error.message, 'bad');
+        $('pay').disabled = false;
+      },
+
+      onClose: () => {
+        step('Customer closed the payment window', 'warn');
+        show('Payment window closed.', 'bad');
+        $('pay').disabled = false;
+      }
+    });
   } catch (error) {
     dump(error);
     step('Failed: ' + (error.code || 'error'), 'bad');
-    show(error.message || 'Failed.', 'bad');
+    show(error.message || 'Something went wrong.', 'bad');
+    $('pay').disabled = false;
   }
 }
 
 $('btn-trace').onclick = async () => {
-  const trace = await api('/v1/payment_intents/' + currentIntent.id + '/transactions');
-  const rendered = trace.data.map(t =>
-    `━━ ${t.type.toUpperCase()} · ${t.outcome} · ${t.rail} · ${t.latency_ms}ms\n`
-    + `   DE39 ${t.response_code || '—'}  ${t.response_text || ''}\n\n`
-    + `REQUEST\n${t.request || '(none)'}\n`
-    + `RESPONSE\n${t.response || '(none)'}\n`
-  ).join('\n');
+  const trace = await demo('/payments/' + session.payment_intent_id + '/transactions');
+  const rendered = trace.data.map(function (t) {
+    return '== ' + t.type.toUpperCase() + ' * ' + t.outcome + ' * ' + t.rail +
+           ' * ' + t.latency_ms + 'ms\n' +
+           '   DE39 ' + (t.response_code || '-') + '  ' + (t.response_text || '') + '\n\n' +
+           'REQUEST\n' + (t.request || '(none)') + '\n' +
+           'RESPONSE\n' + (t.response || '(none)') + '\n';
+  }).join('\n');
   dump(rendered || 'No transactions recorded.');
 };
 </script>

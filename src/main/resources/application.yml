@@ -41,6 +41,17 @@ spring:
           timeout: 5000
           writetimeout: 5000
 
+  security:
+    filter:
+      # Include FORWARD, which Spring Security omits by default.
+      #
+      # Every clean URL in this application is a ViewController forward - the SPA routes, the demo
+      # checkout, the hosted payment page. Without FORWARD here the security filter chain runs on
+      # the outer request but the forwarded dispatch commits the response first, so the security
+      # headers never reach the browser: no CSP, no nosniff, nothing. The .html path is protected
+      # and the pretty URL silently is not, which is the worst possible split.
+      dispatcher-types: request,error,forward,async
+
   session:
     # Sessions in the database, not in server memory: they survive a restart, they work unchanged
     # with more than one instance, and an operator can revoke one by deleting a row.
@@ -107,6 +118,12 @@ mockpay:
     upi-fixed-minor: ${MOCKPAY_PRICING_UPI_FIXED_MINOR:0}
     wallet-bps: ${MOCKPAY_PRICING_WALLET_BPS:180}
     wallet-fixed-minor: ${MOCKPAY_PRICING_WALLET_FIXED_MINOR:0}
+
+  # Who may embed the hosted payment page in an iframe. 'self' is right for the bundled demo;
+  # a real deployment lists the merchant domains that registered, e.g.
+  #   'self' https://shop.example https://*.example.com
+  # Wide open would invite clickjacking of the real payment form.
+  frame-ancestors: ${MOCKPAY_FRAME_ANCESTORS:'self'}
 
   mail:
     # The From address on outbound mail. Providers reject or spam-bin addresses that do not match

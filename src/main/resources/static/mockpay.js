@@ -1,19 +1,35 @@
 /**
  * MockPay browser SDK.
  *
- * The job of a payments client library is narrower than it looks. It exists so that card details
- * go from the customer's keyboard to the gateway without ever passing through the merchant's own
- * servers — which is what keeps the merchant out of PCI scope — and so that every integrator does
- * not have to reimplement the awkward parts of the flow: waiting on a 3-D Secure challenge,
- * surviving a customer who closes the popup, and polling for an outcome that arrives out of band.
+ * Two ways to take a payment, and the difference between them is mostly about PCI scope.
  *
- * Only the publishable key lives here. It cannot move money.
+ * -- 1. Hosted checkout (recommended) ---------------------------------------
  *
- *   const mockpay = MockPay('pk_test_demo_us_publishable');
+ *   mockpay.open({
+ *     clientSecret,                       // from your server
+ *     onSuccess: (r) => confirmOrder(r.paymentIntentId),
+ *     onFailure: (e) => showMessage(e.message),
+ *     onClose:   ()  => {},
+ *   });
+ *
+ * Opens MockPay's own payment page in an iframe over your site. The card fields belong to the
+ * gateway's document, so same-origin policy means your JavaScript cannot read them even by
+ * accident -- and neither can anything injected into your page. Your checkout sits in PCI SAQ A
+ * territory rather than SAQ A-EP, and you write no payment form at all.
+ *
+ * -- 2. Your own form -------------------------------------------------------
+ *
  *   const { paymentMethod } = await mockpay.createPaymentMethod({ type: 'card', card: {...} });
  *   const { paymentIntent, error } = await mockpay.confirmPayment({
  *     clientSecret, paymentMethod: paymentMethod.id
  *   });
+ *
+ * Total control of the UI, and the card number passes through your DOM on its way to the gateway.
+ * It still never reaches your server, but your page is now part of the cardholder data environment,
+ * so a compromised script on that page can skim it. That is the Magecart attack, and it is why
+ * mode 1 exists.
+ *
+ * Only the publishable key lives here. It cannot move money.
  */
 (function (global) {
   'use strict';
@@ -56,6 +72,137 @@
   }
 
   MockPay.prototype = {
+
+    /**
+     * Open the hosted payment page in an iframe over the merchant's site.
+     *
+     * The callbacks are UI signals, not proof of anything -- see _receive below.
+     *
+     * @param params.clientSecret  from the PaymentIntent your server created
+     * @param params.onSuccess     ({ paymentIntentId, status })
+     * @param params.onFailure     ({ code, message, paymentIntentId, status })
+     * @param params.onClose       the customer dismissed the sheet
+     */
+    open: function (params) {
+      if (!params || !params.clientSecret) {
+        throw new Error('mockpay.open needs a clientSecret from your server.');
+      }
+      if (this._overlay) {
+        // Two sheets would mean two live sessions and two sets of listeners.
+        return;
+      }
+
+      var self = this;
+      var url = this.baseUrl + '/checkout/hosted'
+        + '?client_secret=' + encodeURIComponent(params.clientSecret)
+        + '&key=' + encodeURIComponent(this.publishableKey);
+
+      var overlay = document.createElement('div');
+      overlay.setAttribute('data-mockpay', 'overlay');
+      overlay.style.cssText = [
+        'position:fixed', 'inset:0', 'z-index:2147483647',
+        'background:rgba(9,11,15,.62)', 'display:flex',
+        'align-items:center', 'justify-content:center', 'padding:16px',
+        'opacity:0', 'transition:opacity .18s ease'
+      ].join(';');
+
+      var frame = document.createElement('iframe');
+      frame.src = url;
+      frame.setAttribute('title', 'Secure payment');
+      frame.style.cssText = [
+        'width:100%', 'max-width:420px', 'height:min(640px,92vh)',
+        'border:0', 'border-radius:14px', 'background:#fff',
+        'box-shadow:0 24px 64px rgba(0,0,0,.4)'
+      ].join(';');
+
+      overlay.appendChild(frame);
+      document.body.appendChild(overlay);
+
+      // Stop the page behind from scrolling under the sheet.
+      var previousOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      requestAnimationFrame(function () { overlay.style.opacity = '1'; });
+
+      this._overlay = overlay;
+      this._params = params;
+      this._previousOverflow = previousOverflow;
+
+      // Clicking the backdrop dismisses, the way every payment sheet does. Clicks inside the frame
+      // never reach here -- they belong to the other document.
+      overlay.addEventListener('click', function (event) {
+        if (event.target === overlay) self._close('close');
+      });
+
+      this._onMessage = function (event) { self._receive(event); };
+      window.addEventListener('message', this._onMessage);
+    },
+
+    /**
+     * Handle a message from the hosted page.
+     *
+     * Two checks before anything is believed, and both matter:
+     *
+     *   1. event.origin must be the gateway. Without this, ANY page -- an ad iframe, another tab
+     *      holding a handle on this window -- could post "payment succeeded", and the merchant
+     *      would fulfil an order nobody paid for.
+     *   2. The shape must be ours, so unrelated postMessage traffic from analytics, embeds and
+     *      browser extensions is ignored rather than misread.
+     *
+     * Even then the message is only a UI signal. The merchant's SERVER must confirm the payment --
+     * from the webhook, or by fetching the intent with its secret key -- before shipping anything.
+     * An attacker controls their own browser completely; they do not control your webhook.
+     */
+    _receive: function (event) {
+      if (event.origin !== this.baseUrl) return;
+      var data = event.data;
+      if (!data || data.source !== 'mockpay') return;
+
+      var params = this._params || {};
+
+      switch (data.type) {
+        case 'complete':
+          this._close();
+          if (params.onSuccess) {
+            params.onSuccess({ paymentIntentId: data.paymentIntentId, status: data.status });
+          }
+          break;
+        case 'failed':
+          // Deliberately NOT closed: the customer is reading the decline message and may want to
+          // try another card. The sheet closes when they dismiss it.
+          if (params.onFailure) {
+            params.onFailure({
+              paymentIntentId: data.paymentIntentId,
+              status: data.status,
+              code: data.code,
+              message: data.message
+            });
+          }
+          break;
+        case 'cancel':
+          this._close('close');
+          break;
+        default:
+          // 'ready', 'challenge', and anything added later, are informational.
+          if (params.onEvent) params.onEvent(data);
+      }
+    },
+
+    _close: function (reason) {
+      if (!this._overlay) return;
+      window.removeEventListener('message', this._onMessage);
+      this._overlay.remove();
+      document.body.style.overflow = this._previousOverflow || '';
+      var params = this._params;
+      this._overlay = null;
+      this._params = null;
+      this._onMessage = null;
+      if (reason === 'close' && params && params.onClose) params.onClose();
+    },
+
+    /** Dismiss the sheet from the merchant's own code, e.g. on a route change. */
+    close: function () {
+      this._close('close');
+    },
 
     /**
      * Exchange raw instrument details for a token.

@@ -177,8 +177,14 @@ public class SecurityConfig {
         return http
                 .csrf(csrf -> csrf.disable())
                 .headers(headers -> headers
-                        // The demo checkout and the simulated ACS render each other in frames.
-                        .frameOptions(frame -> frame.sameOrigin()))
+                        // X-Frame-Options is a blunt instrument: one value for the whole origin,
+                        // and no way to name several allowed embedders. The hosted payment page
+                        // has to be embeddable by every merchant that integrates, so the modern
+                        // CSP directive replaces it.
+                        // frame-ancestors is set by FrameEmbeddingConfig, which also covers
+                        // forwarded dispatches. X-Frame-Options would contradict it here, and
+                        // browsers give X-Frame-Options precedence when both are present.
+                        .frameOptions(frame -> frame.disable()))
                 .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
                 .build();
     }

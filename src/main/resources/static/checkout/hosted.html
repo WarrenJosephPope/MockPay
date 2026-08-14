@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secure payment</title>
+<style>
+  :root {
+    --bg:#fff; --panel:#f6f7f9; --line:#e3e6ec; --text:#12151c; --muted:#5d6675;
+    --accent:#5b8cff; --ok:#128a55; --bad:#c0392b;
+    --mono: ui-monospace, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12161d; --panel:#1a1f28; --line:#262b36; --text:#e6e8ee; --muted:#9aa3b2; }
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:14.5px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
+    display:flex; flex-direction:column;
+  }
+  header {
+    padding:14px 20px; border-bottom:1px solid var(--line);
+    display:flex; justify-content:space-between; align-items:center; gap:12px;
+  }
+  header .brand { font-weight:700; font-size:14px; }
+  header .amt { font-weight:650; font-size:17px; letter-spacing:-.02em; }
+  header .to { color:var(--muted); font-size:12px; }
+  main { padding:18px 20px 22px; flex:1; overflow-y:auto; }
+  .tabs { display:flex; gap:6px; margin-bottom:14px; }
+  .tabs button {
+    flex:1; padding:8px; border:1px solid var(--line); background:transparent;
+    color:var(--muted); border-radius:8px; font:500 13.5px/1 inherit; cursor:pointer;
+  }
+  .tabs button[aria-selected="true"] { background:var(--accent); color:#fff; border-color:var(--accent); }
+  label { display:block; font-size:11.5px; color:var(--muted); margin:11px 0 5px;
+          text-transform:uppercase; letter-spacing:.05em; }
+  input, select {
+    width:100%; padding:10px 11px; border:1px solid var(--line); border-radius:8px;
+    background:var(--bg); color:var(--text); font:inherit;
+  }
+  input:focus, select:focus { outline:2px solid var(--accent); outline-offset:-1px; }
+  .grid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:9px; }
+  button.pay {
+    width:100%; margin-top:18px; padding:12px; border:0; border-radius:9px;
+    background:var(--accent); color:#fff; font:650 15px/1 inherit; cursor:pointer;
+  }
+  button.pay:disabled { opacity:.55; cursor:not-allowed; }
+  button.link { background:none; border:0; color:var(--muted); font-size:13px; cursor:pointer;
+                width:100%; margin-top:10px; }
+  .chips { display:flex; flex-wrap:wrap; gap:5px; margin-top:9px; }
+  .chip { font:11px/1 var(--mono); padding:5px 7px; border-radius:6px; cursor:pointer;
+          background:var(--panel); border:1px solid var(--line); color:var(--muted); }
+  .chip:hover { border-color:var(--accent); color:var(--text); }
+  .msg { margin-top:13px; padding:10px 12px; border-radius:8px; font-size:13px; display:none; }
+  .msg.show { display:block; }
+  .msg.bad { background:rgba(192,57,43,.12); border:1px solid rgba(192,57,43,.35); color:var(--bad); }
+  .msg.ok  { background:rgba(18,138,85,.12); border:1px solid rgba(18,138,85,.35); color:var(--ok); }
+  .msg.busy{ background:rgba(91,140,255,.12); border:1px solid rgba(91,140,255,.35); }
+  footer { padding:11px 20px; border-top:1px solid var(--line); color:var(--muted); font-size:11.5px; }
+  #challenge { display:none; flex:1; border:0; width:100%; min-height:440px; }
+  body.challenging main, body.challenging footer { display:none; }
+  body.challenging #challenge { display:block; }
+  .done { text-align:center; padding:40px 20px; }
+  .done .tick { font-size:40px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="brand">MockPay</div>
+    <div class="to">to <span id="merchant">the merchant</span></div>
+  </div>
+  <div class="amt" id="amount">—</div>
+</header>
+
+<main id="form-area">
+  <div class="tabs" role="tablist">
+    <button role="tab" aria-selected="true" data-method="card">Card</button>
+    <button role="tab" aria-selected="false" data-method="upi">UPI</button>
+    <button role="tab" aria-selected="false" data-method="wallet">Wallet</button>
+  </div>
+
+  <div id="pane-card">
+    <label for="number">Card number</label>
+    <input id="number" inputmode="numeric" autocomplete="cc-number" value="4242424242424242">
+    <div class="grid3">
+      <div><label for="exp-month">Month</label><input id="exp-month" value="12"></div>
+      <div><label for="exp-year">Year</label><input id="exp-year" value="2030"></div>
+      <div><label for="cvc">CVC</label><input id="cvc" value="123"></div>
+    </div>
+    <div class="chips" id="card-chips"></div>
+  </div>
+
+  <div id="pane-upi" hidden>
+    <label for="vpa">UPI ID</label>
+    <input id="vpa" value="success@mockpay">
+    <div class="chips" id="upi-chips"></div>
+  </div>
+
+  <div id="pane-wallet" hidden>
+    <label for="provider">Wallet</label>
+    <select id="provider">
+      <option value="mockwallet">MockWallet (approves)</option>
+      <option value="failwallet">FailWallet (customer cancels)</option>
+    </select>
+  </div>
+
+  <button class="pay" id="pay">Pay</button>
+  <button class="link" id="cancel">Cancel</button>
+  <div class="msg" id="msg"></div>
+</main>
+
+<iframe id="challenge" title="Authentication"></iframe>
+
+<footer>
+  Card details are entered on MockPay's own page and never reach the merchant's site.
+</footer>
+
+<script>
+/*
+ * The hosted payment page.
+ *
+ * This is the gateway's UI, not the merchant's, and that is the entire point. It runs on the
+ * gateway's origin inside an iframe, so the card number is typed into a document the merchant
+ * cannot read — same-origin policy stops their JavaScript touching these fields at all.
+ *
+ * The PCI consequence is concrete: with the merchant hosting the form themselves, their page is in
+ * scope and they answer SAQ A-EP. With this, the fields are ours and they answer SAQ A, which is a
+ * much shorter questionnaire.
+ *
+ * Everything here authenticates with a publishable key and a client secret. Neither can do anything
+ * beyond tokenising and completing this one payment, which is why it is safe to put them in a URL.
+ */
+const params = new URLSearchParams(location.search);
+const clientSecret = params.get('client_secret') || '';
+const publishableKey = params.get('key') || '';
+const intentId = clientSecret.split('_secret_')[0];
+
+let method = 'card';
+let closed = false;
+
+const $ = (id) => document.getElementById(id);
+const msg = $('msg');
+
+function say(text, kind) {
+  msg.className = 'msg show ' + kind;
+  msg.textContent = text;
+}
+
+/**
+ * Tell the parent window what happened.
+ *
+ * targetOrigin is '*' only because the merchant's origin is not known here — the parent is the one
+ * that must verify, and it checks event.origin against the gateway it loaded the SDK from. Nothing
+ * secret is ever sent in these messages for exactly that reason: a payment id and a status, both of
+ * which the parent already knows or can look up.
+ */
+function tell(type, payload) {
+  parent.postMessage(Object.assign({ source: 'mockpay', type }, payload || {}), '*');
+}
+
+async function json(url, options) {
+  const response = await fetch(url, options);
+  const body = await response.json();
+  if (!response.ok) throw body.error || { message: 'Request failed' };
+  return body;
+}
+
+// ---------------------------------------------------------------- bootstrap
+(async function () {
+  if (!clientSecret || !publishableKey) {
+    say('This payment session is missing its credentials.', 'bad');
+    $('pay').disabled = true;
+    return;
+  }
+  try {
+    const intent = await json(
+      `/v1/public/payment_intents/${intentId}?client_secret=${encodeURIComponent(clientSecret)}`);
+    const minor = intent.currency === 'JPY'
+      ? intent.amount : (intent.amount / 100).toFixed(2);
+    $('amount').textContent = `${intent.currency} ${minor}`;
+    if (intent.description) $('merchant').textContent = intent.description;
+    tell('ready');
+  } catch (e) {
+    say(e.message || 'Could not load this payment.', 'bad');
+    $('pay').disabled = true;
+  }
+})();
+
+// Test instruments, so the demo is usable without memorising card numbers.
+fetch('/v1/public/test_instruments').then((r) => r.json()).then((data) => {
+  data.cards.forEach((card) => {
+    const chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.type = 'button';
+    chip.textContent = card.number.slice(-4);
+    chip.title = card.number + ' — ' + card.note;
+    chip.onclick = () => { $('number').value = card.number; };
+    $('card-chips').appendChild(chip);
+  });
+  data.upi.forEach((entry) => {
+    const chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.type = 'button';
+    chip.textContent = entry.vpa.split('@')[0];
+    chip.onclick = () => { $('vpa').value = entry.vpa; };
+    $('upi-chips').appendChild(chip);
+  });
+}).catch(() => { /* chips are a convenience; their absence is not an error */ });
+
+document.querySelectorAll('.tabs button').forEach((tab) => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', 'false'));
+    tab.setAttribute('aria-selected', 'true');
+    method = tab.dataset.method;
+    ['card', 'upi', 'wallet'].forEach((m) => { $('pane-' + m).hidden = m !== method; });
+  };
+});
+
+$('cancel').onclick = () => {
+  closed = true;
+  tell('cancel');
+};
+
+// ------------------------------------------------------------------- paying
+$('pay').onclick = async () => {
+  $('pay').disabled = true;
+  say('Contacting the issuer…', 'busy');
+
+  try {
+    const details = method === 'card'
+      ? { type: 'card', card: {
+          number: $('number').value,
+          exp_month: parseInt($('exp-month').value, 10),
+          exp_year: parseInt($('exp-year').value, 10),
+          cvc: $('cvc').value,
+        } }
+      : method === 'upi'
+        ? { type: 'upi', upi: { vpa: $('vpa').value } }
+        : { type: 'wallet', wallet: { provider: $('provider').value } };
+
+    // The card number goes from this document straight to the gateway. It has never existed in
+    // the merchant's page.
+    const pm = await json(
+      `/v1/public/payment_methods?key=${encodeURIComponent(publishableKey)}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(details) });
+
+    let intent = await json(
+      `/v1/public/payment_intents/${intentId}/confirm?client_secret=${encodeURIComponent(clientSecret)}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payment_method: pm.id }) });
+
+    if (intent.status === 'requires_action' && intent.next_action) {
+      intent = await runChallenge(intent.next_action.url);
+    }
+
+    finish(intent);
+  } catch (e) {
+    $('pay').disabled = false;
+    say(e.message || 'Something went wrong.', 'bad');
+  }
+};
+
+/**
+ * Show the challenge in a nested iframe and wait for the payment to leave requires_action.
+ *
+ * A nested frame is what real 3-D Secure does — the issuer's access control server renders inside
+ * the checkout rather than stealing the whole window. It also means the customer never leaves this
+ * page, so a closed popup cannot strand the payment.
+ *
+ * The outcome is read by polling the gateway, never inferred from the frame. Whatever happens in
+ * there, the server is the only thing that knows whether the payment succeeded.
+ */
+function runChallenge(url) {
+  document.body.classList.add('challenging');
+  $('challenge').src = url;
+  tell('challenge');
+
+  return new Promise((resolve, reject) => {
+    let waited = 0;
+    const every = 1200;
+    const limit = 5 * 60 * 1000;   // long enough to find a phone and read an SMS
+
+    const timer = setInterval(async () => {
+      waited += every;
+      if (closed) { clearInterval(timer); return; }
+
+      try {
+        const current = await json(
+          `/v1/public/payment_intents/${intentId}?client_secret=${encodeURIComponent(clientSecret)}`);
+
+        if (current.status !== 'requires_action') {
+          clearInterval(timer);
+          document.body.classList.remove('challenging');
+          resolve(current);
+        } else if (waited >= limit) {
+          clearInterval(timer);
+          document.body.classList.remove('challenging');
+          reject({ message: 'Authentication was not completed in time.' });
+        }
+      } catch (e) {
+        clearInterval(timer);
+        document.body.classList.remove('challenging');
+        reject(e);
+      }
+    }, every);
+  });
+}
+
+function finish(intent) {
+  const good = intent.status === 'succeeded'
+    || intent.status === 'requires_capture'
+    || intent.status === 'processing';
+
+  document.body.classList.remove('challenging');
+
+  if (good) {
+    $('form-area').innerHTML =
+      '<div class="done"><div class="tick">✓</div><p>Payment complete.</p></div>';
+    tell('complete', { paymentIntentId: intent.id, status: intent.status });
+  } else {
+    $('pay').disabled = false;
+    const error = intent.last_payment_error;
+    say(error ? error.message : 'The payment did not go through.', 'bad');
+    tell('failed', {
+      paymentIntentId: intent.id,
+      status: intent.status,
+      code: error ? (error.decline_code || error.code) : 'payment_failed',
+      message: error ? error.message : 'The payment did not go through.',
+    });
+  }
+}
+</script>
+</body>
+</html>

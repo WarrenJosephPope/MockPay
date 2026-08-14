@@ -7,7 +7,10 @@
 # --------------------------------------------------------------------------
 # Stage 1 — build
 # --------------------------------------------------------------------------
-FROM eclipse-temurin:17-jdk-alpine AS build
+# Debian, not Alpine, for the BUILD stage only. frontend-maven-plugin downloads the official Node
+# binaries, which are linked against glibc and simply do not run on Alpine's musl. The runtime
+# stage stays Alpine, so the shipped image is unaffected.
+FROM eclipse-temurin:17-jdk-jammy AS build
 WORKDIR /build
 
 # Copy the wrapper and the POM first, on their own layer. Dependencies change
@@ -18,6 +21,12 @@ COPY .mvn/ .mvn/
 COPY mvnw pom.xml ./
 RUN chmod +x mvnw && ./mvnw -B dependency:go-offline
 
+# The dashboard's lockfile changes far less often than its source, so copying it first keeps the
+# npm install layer cached across front-end edits.
+COPY dashboard/package.json dashboard/package-lock.json dashboard/
+RUN ./mvnw -B generate-resources
+
+COPY dashboard/ dashboard/
 COPY src/ src/
 RUN ./mvnw -B -DskipTests package
 

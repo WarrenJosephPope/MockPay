@@ -32,6 +32,16 @@ build/
 ### VS Code ###
 .vscode/
 
+### Frontend ###
+# Restored by `npm ci` from package-lock.json, which IS committed — that lockfile is what makes
+# the build reproducible, so it must never be ignored.
+dashboard/node_modules/
+# Vite builds straight into target/classes/static during `mvn package`; nothing to keep here.
+dashboard/dist/
+dashboard/.vite/
+npm-debug.log*
+# frontend-maven-plugin downloads its own Node into target/, which is already ignored.
+
 ### Local Docker volumes ###
 # PostgreSQL's data directory, bind-mounted by docker-compose. Thousands of
 # binary files, machine-specific, and it would be a data leak if committed.

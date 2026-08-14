@@ -542,6 +542,56 @@ if [ -n "$R1" ] && [ "$R1" = "$R2" ]; then echo "  PASS  double-clicked refund c
 else echo "  FAIL  created two refunds: $R1 vs $R2"; FAIL=$((FAIL+1)); fi
 chk "same key, different body -> 422" "$(dkey /dashboard/api-keys '{"type":"publishable","name":"different"}' $DJ "$IK")" "idempotency_key_reused"
 
+echo; echo "=== 39. Hosted checkout page (the iframe) ==="
+chk "hosted page served at the clean URL" "$(curl -s -o /dev/null -w '%{http_code}' $B/checkout/hosted)" '^200$'
+chk "it is embeddable, not DENY" "$(curl -sI $B/checkout/hosted | grep -ci 'x-frame-options')" '^0$'
+chk "frame-ancestors set on the forwarded URL" "$(curl -sI $B/checkout/hosted | tr -d '\r' | grep -i 'content-security-policy')" "frame-ancestors"
+chk "and on the SPA routes too" "$(curl -sI $B/login | tr -d '\r' | grep -i 'content-security-policy')" "frame-ancestors"
+chk "page carries no secret key" "$(curl -s $B/checkout/hosted | grep -c 'sk_test')" '^0$'
+chk "it validates its own credentials" "$(curl -s $B/checkout/hosted | grep -c 'missing its credentials')" '^1$'
+
+echo; echo "=== 40. The flow the iframe performs ==="
+HS=$(curl -s -X POST $B/demo/checkout-session -H 'Content-Type: application/json' \
+  -d '{"amount":4999,"currency":"USD","description":"Hosted order"}')
+HPI=$(echo "$HS" | field payment_intent_id)
+HCS=$(echo "$HS" | field client_secret)
+HPK=$(echo "$HS" | field publishable_key)
+chk "session created by the store backend" "$HPI" '^pi_'
+chk "no secret key handed to the browser" "$(echo "$HS" | grep -c 'sk_test')" '^0$'
+chk "iframe can read the amount with the client secret" "$(curl -s "$B/v1/public/payment_intents/$HPI?client_secret=$HCS")" '"amount":4999'
+chk "wrong client secret refused" "$(curl -s "$B/v1/public/payment_intents/$HPI?client_secret=wrong")" "invalid_client_secret"
+HPM=$(curl -s -X POST "$B/v1/public/payment_methods?key=$HPK" -H 'Content-Type: application/json' \
+  -d '{"type":"card","card":{"number":"4242424242424242","exp_month":12,"exp_year":2030,"cvc":"123"}}' | field id)
+chk "tokenised inside the gateway's document" "$HPM" '^pm_'
+chk "confirmed with the client secret" "$(curl -s -X POST "$B/v1/public/payment_intents/$HPI/confirm?client_secret=$HCS" -H 'Content-Type: application/json' -d "{\"payment_method\":\"$HPM\"}")" '"status":"succeeded"'
+chk "store backend confirms independently" "$(curl -s $B/demo/payments/$HPI)" '"status":"succeeded"'
+
+echo; echo "=== 41. Hosted flow through a 3-D Secure challenge ==="
+HS=$(curl -s -X POST $B/demo/checkout-session -H 'Content-Type: application/json' \
+  -d '{"amount":6000,"currency":"USD","description":"Challenged order"}')
+HPI=$(echo "$HS" | field payment_intent_id); HCS=$(echo "$HS" | field client_secret)
+HPM=$(curl -s -X POST "$B/v1/public/payment_methods?key=$HPK" -H 'Content-Type: application/json' \
+  -d '{"type":"card","card":{"number":"4000002500003155","exp_month":12,"exp_year":2030,"cvc":"123"}}' | field id)
+r=$(curl -s -X POST "$B/v1/public/payment_intents/$HPI/confirm?client_secret=$HCS" -H 'Content-Type: application/json' -d "{\"payment_method\":\"$HPM\"}")
+chk "challenge requested" "$r" '"status":"requires_action"'
+CACT=$(echo "$r" | action)
+chk "challenge renders in a nested frame" "$(curl -s -o /dev/null -w '%{http_code}' "$B/challenge/3ds?action=$CACT")" '^200$'
+chk "challenge page is framable" "$(curl -sI "$B/challenge/3ds?action=$CACT" | grep -ci 'x-frame-options')" '^0$'
+curl -s -X POST $B/v1/public/challenge/3ds/$CACT -H 'Content-Type: application/json' -d '{"otp":"123456"}' >/dev/null
+chk "polling sees it leave requires_action" "$(curl -s "$B/v1/public/payment_intents/$HPI?client_secret=$HCS")" '"status":"succeeded"'
+chk "backend agrees after the challenge" "$(curl -s $B/demo/payments/$HPI)" '"status":"succeeded"'
+
+echo; echo "=== 42. SDK exposes both integration modes ==="
+SDK=$(curl -s $B/mockpay.js)
+chk "hosted mode: open()" "$SDK" 'open: function'
+chk "own-form mode still present" "$SDK" 'createPaymentMethod: async function'
+chk "postMessage origin is validated" "$SDK" 'if (event.origin !== this.baseUrl) return'
+chk "message shape is validated too" "$SDK" "data.source !== 'mockpay'"
+chk "SDK documents that a message is not proof" "$SDK" 'SERVER must confirm'
+chk "no secret key in the SDK" "$(echo "$SDK" | grep -c 'sk_test')" '^0$'
+chk "demo checkout offers both modes" "$(curl -s $B/checkout)" 'data-mode="inline"'
+chk "demo checkout re-checks on the backend" "$(curl -s $B/checkout)" 'Backend re-checking'
+
 echo; echo "======================================"
 echo "  PASS: $PASS   FAIL: $FAIL"
 echo "======================================"

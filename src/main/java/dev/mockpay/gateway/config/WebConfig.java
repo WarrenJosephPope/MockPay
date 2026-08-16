@@ -41,7 +41,7 @@ public class WebConfig implements WebMvcConfigurer {
         for (String route : new String[]{
                 "/", "/login", "/signup", "/forgot-password", "/reset-password",
                 "/accept-invitation", "/payments", "/api-keys", "/endpoints", "/events",
-                "/team", "/audit", "/settings"}) {
+                "/team", "/audit", "/settings", "/docs"}) {
             registry.addViewController(route).setViewName("forward:/index.html");
         }
         // One level of path variable, for /payments/pi_123 and friends.

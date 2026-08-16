@@ -9,6 +9,8 @@ import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -77,6 +79,27 @@ public class ErrorHandler {
                 "type", "invalid_request_error",
                 "code", "invalid_state_transition",
                 "message", e.getMessage() == null ? "Invalid operation for this object." : e.getMessage())));
+    }
+
+    /**
+     * A path that matches no handler.
+     *
+     * <p>Without this it falls through to the catch-all and a typo in a URL is reported as
+     * {@code 500 internal_error} — telling the caller the server is broken when the truth is that
+     * they asked for something that does not exist. Worse, it is indistinguishable from a real
+     * outage, so the first instinct is to retry, which is precisely the wrong response to a 404.
+     *
+     * <p>Spring resolves an unmatched path to the static-resource handler before deciding nothing
+     * can serve it, which is why the exception is {@code NoResourceFoundException} rather than
+     * anything mentioning routing.
+     */
+    @ExceptionHandler({NoResourceFoundException.class, NoHandlerFoundException.class})
+    public ResponseEntity<Map<String, Object>> handleNoRoute(Exception e, HttpServletRequest request) {
+        return ResponseEntity.status(404).body(Map.of("error", Map.of(
+                "type", "invalid_request_error",
+                "code", "unknown_endpoint",
+                "message", "Unrecognized request URL (" + request.getMethod() + " "
+                        + request.getRequestURI() + "). Check the path against the API reference.")));
     }
 
     @ExceptionHandler(Exception.class)

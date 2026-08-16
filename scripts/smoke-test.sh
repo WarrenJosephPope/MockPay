@@ -592,6 +592,29 @@ chk "no secret key in the SDK" "$(echo "$SDK" | grep -c 'sk_test')" '^0$'
 chk "demo checkout offers both modes" "$(curl -s $B/checkout)" 'data-mode="inline"'
 chk "demo checkout re-checks on the backend" "$(curl -s $B/checkout)" 'Backend re-checking'
 
+echo; echo "=== 43. Docs page ==="
+# The page itself is React, so what is testable from here is the route and the data it renders
+# from. A docs page that prints a stale or unusable credential is worse than no docs page.
+chk "route survives a refresh"     "$(curl -s -o /dev/null -w '%{http_code}' $B/docs)" '^200$'
+chk "served the SPA, not a 404"    "$(curl -s $B/docs)" 'dashboard-assets'
+chk "does not swallow /v1"         "$(curl -s -o /dev/null -w '%{http_code}' $B/v1/no_such_thing -H "Authorization: Bearer $SK")" '^404$'
+# A typo'd URL used to surface as 500 internal_error, which reads as "the gateway is broken" and
+# invites a retry — the one response a 404 must never provoke.
+chk "unknown path is a 404, not a 500" "$(api GET /v1/no_such_thing)" '"code":"unknown_endpoint"'
+chk "and names the path that was wrong" "$(api GET /v1/no_such_thing)" 'GET /v1/no_such_thing'
+DOCKEYS=$(dget /dashboard/api-keys $DJ)
+chk "publishable key is readable, so snippets can be real" "$(echo "$DOCKEYS" | python -c "import sys,json
+d=json.load(sys.stdin)['data']
+print(next((k['key'] for k in d if k['type']=='publishable' and not k.get('revoked_at')), 'NONE'))")" '^pk_'
+chk "secret keys still never round-trip"  "$(echo "$DOCKEYS" | python -c "import sys,json
+d=json.load(sys.stdin)['data']
+print(sum(1 for k in d if k['type']=='secret' and k.get('key')))")" '^0$'
+TI=$(curl -s $B/v1/public/test_instruments)
+chk "instruments table needs no key"      "$TI" '"cards"'
+chk "and carries the note the page shows" "$TI" '"note"'
+chk "3DS OTP is published, not folklore"  "$TI" '"three_ds_otp":"123456"'
+chk "endpoint secret available for the verify snippet" "$(dget /dashboard/webhook-endpoints $DJ)" '"secret":"whsec_'
+
 echo; echo "======================================"
 echo "  PASS: $PASS   FAIL: $FAIL"
 echo "======================================"

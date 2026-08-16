@@ -529,8 +529,15 @@ Replay with `POST /v1/events/{id}/replay`.
 | **Team** | Invite by email, change roles, remove members |
 | **Audit log** | Who did what, from which IP |
 | **Settings** | Business profile; currency and country are shown read-only and refused if edited |
+| **Docs** | The integration guide, rendered with this account's own keys substituted into every snippet |
 
 Controls are hidden by role as a courtesy — the server enforces every one of them independently.
+
+The Docs screen is worth a look before writing any integration code. It is the same material as this
+README, except the publishable key, base URL and webhook signing secret in the snippets are the real
+ones — so the first thing a developer copies works against their own account without editing a
+placeholder. It also renders the test-instrument table live from
+`/v1/public/test_instruments`, which means it cannot drift from what the gateway actually accepts.
 
 ## What is modelled
 
@@ -567,6 +574,7 @@ Controls are hidden by role as a courtesy — the server enforces every one of t
 | Hashed API keys, rotation, revocation | `service/ApiKeyService.java` |
 | Multi-endpoint webhooks with event filtering | `domain/WebhookEndpoint.java`, `service/EventService.java` |
 | Account creation and bootstrap | `service/AccountService.java`, `config/BootstrapRunner.java` |
+| Integration docs rendered with live credentials | `dashboard/src/pages/Docs.tsx` |
 
 Every class carries a Javadoc comment explaining *why* it works that way, not just what it does.
 Hover over a type in your IDE to read it.
@@ -575,7 +583,7 @@ Hover over a type in your IDE to read it.
 
 ## Testing
 
-253 end-to-end assertions across every flow:
+264 end-to-end assertions across every flow:
 
 ```bash
 bash scripts/smoke-test.sh
@@ -673,7 +681,7 @@ gateway-service/
 ├── docker-compose.yml          Postgres + the gateway
 ├── docker-compose.dev.yml      Postgres only; run the app from the CLI
 ├── Dockerfile                  multi-stage build, non-root runtime
-├── scripts/smoke-test.sh       253 end-to-end assertions
+├── scripts/smoke-test.sh       264 end-to-end assertions
 ├── volumes/postgres/           bind-mounted database files (gitignored)
 └── src/main/
     ├── java/dev/mockpay/gateway/

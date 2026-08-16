@@ -15,6 +15,7 @@ import Events from './pages/Events';
 import Team from './pages/Team';
 import Settings from './pages/Settings';
 import AuditLog from './pages/AuditLog';
+import Docs from './pages/Docs';
 
 /**
  * Everything below the router.
@@ -52,6 +53,9 @@ function Shell({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
           <NavLink to="/team">Team</NavLink>
           {canSeeAudit && <NavLink to="/audit">Audit log</NavLink>}
           <NavLink to="/settings">Settings</NavLink>
+          {/* Not role-gated: everyone benefits from reading how the thing works, and the page
+              degrades to placeholders for roles that may not see keys. */}
+          <NavLink to="/docs">Docs</NavLink>
         </nav>
         <div className="who">
           <div><strong>{me.merchant.name}</strong></div>
@@ -76,6 +80,7 @@ function Shell({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
           <Route path="/team" element={<Team role={me.role} meUserId={me.user.id} />} />
           <Route path="/audit" element={<AuditLog />} />
           <Route path="/settings" element={<Settings role={me.role} />} />
+          <Route path="/docs" element={<Docs role={me.role} />} />
           <Route path="*" element={<Navigate to="/payments" replace />} />
         </Routes>
       </main>
